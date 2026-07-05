@@ -15,7 +15,7 @@ function asV3(v: any): [number, number, number] {
 }
 
 export async function loadSceneGraph(path: string): Promise<SceneData> {
-  const resp = await fetch(path);
+  const resp = await fetch(path, { cache: "no-store" });
   if (!resp.ok) throw new Error(`Failed to load ${path}: ${resp.status}`);
   const root = await resp.json();
 

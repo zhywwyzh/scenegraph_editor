@@ -40,6 +40,21 @@ export function addRemoveEdge(m: Mutations, e: EdgeRef): Mutations {
   return n;
 }
 
+export function addMovePoly(
+  m: Mutations,
+  id: number,
+  center: [number, number, number],
+): Mutations {
+  const n = shallowCopy(m);
+  const idx = n.movePoly.findIndex((mp) => mp.id === id);
+  if (idx >= 0) {
+    n.movePoly[idx] = { id, center: [...center] };
+  } else {
+    n.movePoly = [...n.movePoly, { id, center: [...center] }];
+  }
+  return n;
+}
+
 export function addAddEdge(m: Mutations, e: EdgeRef): Mutations {
   const key = edgeKey(e.srcId, e.dstId);
   if (m.addEdges.some((a) => edgeKey(a.srcId, a.dstId) === key)) return m;

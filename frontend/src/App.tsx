@@ -13,6 +13,7 @@ import { TopologicalEdges } from "./components/TopologicalEdges";
 import { WorldAxes } from "./components/WorldAxes";
 import { EditToolbar } from "./components/EditToolbar";
 import { ExportDiffPanel } from "./components/ExportDiffPanel";
+import { NodePropertyPanel } from "./components/NodePropertyPanel";
 import { loadSceneGraph } from "./lib/scene-loader";
 import { pickTarget } from "./lib/picking";
 import type { PickTarget } from "./lib/picking";
@@ -34,6 +35,7 @@ import {
   addDeletePoly,
   addRemoveEdge,
   addAddEdge,
+  addMovePoly,
 } from "./lib/mutations";
 import type {
   SceneData,
@@ -890,6 +892,15 @@ export function App() {
             </span>
           )}
         </div>
+      )}
+
+      {editMode === "edit" && selectedNodeIds.size === 1 && (
+        <NodePropertyPanel
+          node={effectiveTNodes.find((n) => selectedNodeIds.has(n.id))!}
+          onChangePosition={(id, center) => {
+            commitEdit((current) => addMovePoly(current, id, center));
+          }}
+        />
       )}
 
       {editMode === "edit" && selectedNodeIds.size === 2 && (
