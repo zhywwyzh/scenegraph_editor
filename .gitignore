@@ -1,6 +1,7 @@
 # Scene graph data
 scene_graph_saved/
 scene_graph_exported/
+pcd/
 
 # Node / Bun
 node_modules/
