@@ -1,17 +1,20 @@
 import * as THREE from "three";
-import type { TopologicalEdge, TopologicalNode } from "./types";
+import type { TopologicalEdge, TopologicalNode, SceneObject } from "./types";
 
 export const NODE_PICK_RADIUS_PX = 10;
 export const EDGE_PICK_RADIUS_PX = 7;
+export const OBJECT_PICK_RADIUS_PX = 10;
 
 export type PickTarget =
   | { kind: "node"; id: number }
   | { kind: "edge"; key: string }
+  | { kind: "object"; id: number }
   | null;
 
 interface PickOptions {
   nodes: TopologicalNode[];
   edges: TopologicalEdge[];
+  objects?: SceneObject[];
   camera: THREE.Camera;
   sceneMatrixWorld: THREE.Matrix4;
   width: number;
@@ -20,6 +23,7 @@ interface PickOptions {
   pointerY: number;
   nodeRadiusPx?: number;
   edgeRadiusPx?: number;
+  objectRadiusPx?: number;
 }
 
 interface ProjectedPoint {
@@ -60,6 +64,7 @@ export function projectLocalPoint(
 export function pickTarget({
   nodes,
   edges,
+  objects,
   camera,
   sceneMatrixWorld,
   width,
@@ -68,16 +73,21 @@ export function pickTarget({
   pointerY,
   nodeRadiusPx = NODE_PICK_RADIUS_PX,
   edgeRadiusPx = EDGE_PICK_RADIUS_PX,
+  objectRadiusPx = OBJECT_PICK_RADIUS_PX,
 }: PickOptions): PickTarget {
   if (width <= 0 || height <= 0) return null;
 
   let best: Candidate | null = null;
-  const projectedByNodeId = new Map<number, ProjectedPoint | null>();
-  const projectNode = (
-    id: number,
+
+  // Cache keyed by "n_<id>" / "o_<id>" to avoid collisions between
+  // nodes and objects that share the same numeric id range.
+  const projCache = new Map<string, ProjectedPoint | null>();
+  const projectPoint = (
+    key: string,
     position: [number, number, number],
   ): ProjectedPoint | null => {
-    if (projectedByNodeId.has(id)) return projectedByNodeId.get(id)!;
+    const cached = projCache.get(key);
+    if (cached !== undefined) return cached;
     const point = projectLocalPoint(
       position,
       sceneMatrixWorld,
@@ -85,12 +95,12 @@ export function pickTarget({
       width,
       height,
     );
-    projectedByNodeId.set(id, point);
+    projCache.set(key, point);
     return point;
   };
 
   for (const node of nodes) {
-    const point = projectNode(node.id, node.position);
+    const point = projectPoint(`n_${node.id}`, node.position);
     if (!point) continue;
 
     const distance = Math.hypot(pointerX - point.x, pointerY - point.y);
@@ -103,8 +113,8 @@ export function pickTarget({
   }
 
   for (const edge of edges) {
-    const start = projectNode(edge.srcId, edge.srcPos);
-    const end = projectNode(edge.dstId, edge.dstPos);
+    const start = projectPoint(`n_${edge.srcId}`, edge.srcPos);
+    const end = projectPoint(`n_${edge.dstId}`, edge.dstPos);
     if (!start || !end) continue;
 
     const distance = pointToSegmentDistance(
@@ -121,6 +131,20 @@ export function pickTarget({
       target: { kind: "edge", key: canonicalEdgeKey(edge.srcId, edge.dstId) },
       score: distance / edgeRadiusPx,
       depth: (start.depth + end.depth) * 0.5,
+    });
+  }
+
+  // Object picking — similar to node picking
+  for (const obj of objects ?? []) {
+    const point = projectPoint(`o_${obj.id}`, obj.position);
+    if (!point) continue;
+
+    const distance = Math.hypot(pointerX - point.x, pointerY - point.y);
+    if (distance > objectRadiusPx) continue;
+    best = chooseBetter(best, {
+      target: { kind: "object", id: obj.id },
+      score: distance / objectRadiusPx,
+      depth: point.depth,
     });
   }
 

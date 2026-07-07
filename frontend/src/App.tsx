@@ -14,6 +14,9 @@ import { WorldAxes } from "./components/WorldAxes";
 import { EditToolbar } from "./components/EditToolbar";
 import { ExportDiffPanel } from "./components/ExportDiffPanel";
 import { NodePropertyPanel } from "./components/NodePropertyPanel";
+import { ObjectsLayer } from "./components/ObjectsLayer";
+import { ObjectPropertyPanel } from "./components/ObjectPropertyPanel";
+import { AddNodePanel } from "./components/AddNodePanel";
 import { loadSceneGraph } from "./lib/scene-loader";
 import { pickTarget } from "./lib/picking";
 import type { PickTarget } from "./lib/picking";
@@ -36,12 +39,17 @@ import {
   addRemoveEdge,
   addAddEdge,
   addMovePoly,
+  addUpdateObjectLabel,
+  addUpdateObjectFatherPoly,
+  addDeleteObject,
+  addCreatePoly,
 } from "./lib/mutations";
 import type {
   SceneData,
   PreprocessedPoly,
   TopologicalNode,
   TopologicalEdge,
+  SceneObject,
   Mutations,
   EditMode,
   ExportResponse,
@@ -58,6 +66,7 @@ interface Layers {
   polyMesh: boolean;
   topoNodes: boolean;
   topoEdges: boolean;
+  objects: boolean;
 }
 
 type LayerKey = keyof Layers;
@@ -71,6 +80,7 @@ const EDIT_ONLY_LAYERS: Layers = {
   polyMesh: false,
   topoNodes: true,
   topoEdges: true,
+  objects: true,
 };
 
 interface ConnectionNotice {
@@ -87,21 +97,39 @@ function vDist(
   return Math.sqrt((a[0] - b[0]) ** 2 + (a[1] - b[1]) ** 2 + (a[2] - b[2]) ** 2);
 }
 
+function makeSyntheticNode(
+  center: [number, number, number],
+  areaId: number,
+  id: number,
+): TopologicalNode {
+  return { id, areaId, position: center, colorHex: "#3498db" };
+}
+
 function effectiveNodes(
   allNodes: TopologicalNode[],
   m: Mutations,
 ): TopologicalNode[] {
   const deleted = new Set(m.deletePolyIds);
   const moveMap = new Map(m.movePoly.map((mp) => [mp.id, mp.center]));
-  return allNodes
+
+  const existing = allNodes
     .filter((n) => !deleted.has(n.id))
     .map((n) => {
       const newCenter = moveMap.get(n.id);
       if (newCenter) {
-        return { ...n, position: [...newCenter] };
+        return { ...n, position: [newCenter[0], newCenter[1], newCenter[2]] as [number, number, number] };
       }
       return n;
     });
+
+  // Synthesise display nodes for pending createPoly mutations
+  let tempId = -1;
+  const created: TopologicalNode[] = [];
+  for (const cp of m.createPoly) {
+    created.push(makeSyntheticNode(cp.center as [number, number, number], cp.areaId, tempId--));
+  }
+
+  return [...existing, ...created];
 }
 
 function effectiveEdges(
@@ -155,24 +183,51 @@ function effectiveEdges(
   return [...existing, ...added];
 }
 
+function effectiveObjects(
+  allObjects: SceneObject[],
+  m: Mutations,
+): SceneObject[] {
+  const deleted = new Set(m.deleteObjectIds);
+  const labelMap = new Map(m.updateObjectLabels.map((u) => [u.id, u.label]));
+  const fatherPolyMap = new Map(m.updateObjectFatherPolys.map((u) => [u.objectId, u.fatherPolyId]));
+  return allObjects
+    .filter((o) => !deleted.has(o.id))
+    .map((o) => {
+      let obj = o;
+      const newLabel = labelMap.get(o.id);
+      if (newLabel !== undefined) {
+        obj = { ...obj, label: newLabel };
+      }
+      const newFather = fatherPolyMap.get(o.id);
+      if (newFather !== undefined) {
+        obj = { ...obj, fatherPolyId: newFather };
+      }
+      return obj;
+    });
+}
+
 // ---- click handler (inside Canvas) ----
 
 function ClickHandler({
   nodes,
   edges,
+  objects,
   editMode,
   sceneGroupRef,
   onSelectNode,
   onSelectEdge,
+  onSelectObject,
   onDeselectAll,
   onHoverTarget,
 }: {
   nodes: TopologicalNode[];
   edges: TopologicalEdge[];
+  objects: SceneObject[];
   editMode: boolean;
   sceneGroupRef: RefObject<THREE.Group | null>;
   onSelectNode: (id: number, additive: boolean) => void;
   onSelectEdge: (key: string) => void;
+  onSelectObject: (id: number, additive: boolean) => void;
   onDeselectAll: () => void;
   onHoverTarget: (target: PickTarget) => void;
 }) {
@@ -199,6 +254,7 @@ function ClickHandler({
       return pickTarget({
         nodes,
         edges,
+        objects,
         camera,
         sceneMatrixWorld: sceneGroup.matrixWorld,
         width: rect.width,
@@ -253,6 +309,11 @@ function ClickHandler({
         onSelectEdge(target.key);
         return;
       }
+      if (target?.kind === "object") {
+        e.stopPropagation();
+        onSelectObject(target.id, e.shiftKey || e.ctrlKey || e.metaKey);
+        return;
+      }
 
       onDeselectAll();
     };
@@ -274,11 +335,13 @@ function ClickHandler({
     editMode,
     nodes,
     edges,
+    objects,
     gl,
     camera,
     sceneGroupRef,
     onSelectNode,
     onSelectEdge,
+    onSelectObject,
     onDeselectAll,
     onHoverTarget,
   ]);
@@ -293,13 +356,16 @@ function Scene({
   effectiveNodes: tNodes,
   effectiveEdges: tEdges,
   effectivePolys,
+  effectiveObjects: tObjects,
   layers,
   selectedArea,
   selectedNodeIds,
   selectedEdgeKey,
+  selectedObjectIds,
   editMode,
   onSelectNode,
   onSelectEdge,
+  onSelectObject,
   onDeselectAll,
   meshOpacity,
 }: {
@@ -307,13 +373,16 @@ function Scene({
   effectiveNodes: TopologicalNode[];
   effectiveEdges: TopologicalEdge[];
   effectivePolys: PreprocessedPoly[];
+  effectiveObjects: SceneObject[];
   layers: Layers;
   selectedArea: number | null;
   selectedNodeIds: Set<number>;
   selectedEdgeKey: string | null;
+  selectedObjectIds: Set<number>;
   editMode: boolean;
   onSelectNode: (id: number, additive: boolean) => void;
   onSelectEdge: (key: string | null) => void;
+  onSelectObject: (id: number, additive: boolean) => void;
   onDeselectAll: () => void;
   meshOpacity: number;
 }) {
@@ -328,6 +397,12 @@ function Scene({
       return target;
     });
   }, []);
+
+  // Node lookup map for object→father_poly connection lines
+  const nodeMap = useMemo(
+    () => new Map(tNodes.map((n) => [n.id, n])),
+    [tNodes],
+  );
 
   const areaBoxes = useMemo(
     () =>
@@ -390,14 +465,26 @@ function Scene({
             hoveredNodeId={hoverTarget?.kind === "node" ? hoverTarget.id : null}
           />
         )}
-        {/* Click handler: processes node/edge selection. */}
+        {layers.objects && (
+          <ObjectsLayer
+            objects={tObjects}
+            nodeMap={nodeMap}
+            visible
+            selectedArea={selectedArea}
+            selectedObjectIds={selectedObjectIds}
+            hoveredObjectId={hoverTarget?.kind === "object" ? hoverTarget.id : null}
+          />
+        )}
+        {/* Click handler: processes node/edge/object selection. */}
         <ClickHandler
           nodes={layers.topoNodes ? tNodes : []}
           edges={layers.topoEdges ? tEdges : []}
+          objects={layers.objects ? tObjects : []}
           editMode={editMode}
           sceneGroupRef={sceneGroupRef}
           onSelectNode={onSelectNode}
           onSelectEdge={onSelectEdge}
+          onSelectObject={onSelectObject}
           onDeselectAll={onDeselectAll}
           onHoverTarget={handleHoverTarget}
         />
@@ -431,6 +518,7 @@ export function App() {
     polyMesh: true,
     topoNodes: true,
     topoEdges: true,
+    objects: true,
   });
   const [selectedArea, setSelectedArea] = useState<number | null>(null);
   const [meshOpacity, setMeshOpacity] = useState(0.1);
@@ -441,6 +529,9 @@ export function App() {
     new Set(),
   );
   const [selectedEdgeKey, setSelectedEdgeKey] = useState<string | null>(null);
+  const [selectedObjectIds, setSelectedObjectIds] = useState<Set<number>>(
+    new Set(),
+  );
   const [editHistory, setEditHistory] = useState(() =>
     createHistory(emptyMutations()),
   );
@@ -449,6 +540,7 @@ export function App() {
   const [base, setBase] = useState<"saved" | "exported">("saved");
   const [connectionNotice, setConnectionNotice] =
     useState<ConnectionNotice | null>(null);
+  const [showAddPanel, setShowAddPanel] = useState(false);
 
   const mutations = editHistory.present;
 
@@ -515,6 +607,9 @@ export function App() {
         return next;
       });
       setSelectedEdgeKey(null);
+      // Keep object selection when Shift+clicking (additive) so
+      // the user can select 1 object + 1 node for reconnection.
+      if (!additive) setSelectedObjectIds(new Set());
     },
     [],
   );
@@ -524,11 +619,34 @@ export function App() {
   const handleSelectEdge = useCallback((key: string | null) => {
     setSelectedEdgeKey(key);
     setSelectedNodeIds(new Set());
+    setSelectedObjectIds(new Set());
   }, []);
+
+  // ---- object selection ----
+
+  const handleSelectObject = useCallback(
+    (id: number, additive: boolean) => {
+      setSelectedObjectIds((prev) => {
+        const next = new Set(additive ? prev : []);
+        if (next.has(id)) {
+          next.delete(id);
+        } else {
+          next.add(id);
+        }
+        return next;
+      });
+      // Keep node selection when Shift+clicking so the user can
+      // select 1 object + 1 node for reconnection.
+      if (!additive) setSelectedNodeIds(new Set());
+      setSelectedEdgeKey(null);
+    },
+    [],
+  );
 
   const handleDeselectAll = useCallback(() => {
     setSelectedNodeIds(new Set());
     setSelectedEdgeKey(null);
+    setSelectedObjectIds(new Set());
   }, []);
 
   const handleConnectSelected = useCallback(() => {
@@ -584,6 +702,27 @@ export function App() {
     setSelectedEdgeKey(key);
   }, [commitEdit, data, mutations, selectedNodeIds]);
 
+  // ---- object ↔ node connection ----
+
+  const handleConnectObjectToNode = useCallback(() => {
+    const objIds = [...selectedObjectIds];
+    const nodeIds = [...selectedNodeIds];
+    if (objIds.length !== 1 || nodeIds.length !== 1) return;
+
+    const objectId = objIds[0];
+    const fatherPolyId = nodeIds[0];
+
+    commitEdit((current) =>
+      addUpdateObjectFatherPoly(current, objectId, fatherPolyId),
+    );
+    setConnectionNotice({
+      kind: "success",
+      message: `Object ${objectId} connected to Poly ${fatherPolyId}`,
+    });
+    setSelectedObjectIds(new Set());
+    setSelectedNodeIds(new Set());
+  }, [commitEdit, selectedObjectIds, selectedNodeIds]);
+
   useEffect(() => {
     if (!connectionNotice) return;
     const timeout = window.setTimeout(() => setConnectionNotice(null), 3000);
@@ -598,6 +737,7 @@ export function App() {
     setEditHistory((history) => undoHistory(history));
     setSelectedNodeIds(new Set());
     setSelectedEdgeKey(null);
+    setSelectedObjectIds(new Set());
     setConnectionNotice({ kind: "info", message: "Undo applied" });
   }, [editHistory.past.length]);
 
@@ -609,6 +749,7 @@ export function App() {
     setEditHistory((history) => redoHistory(history));
     setSelectedNodeIds(new Set());
     setSelectedEdgeKey(null);
+    setSelectedObjectIds(new Set());
     setConnectionNotice({ kind: "info", message: "Redo applied" });
   }, [editHistory.future.length]);
 
@@ -657,6 +798,15 @@ export function App() {
             return nextMutations;
           });
           setSelectedNodeIds(new Set());
+        } else if (selectedObjectIds.size > 0) {
+          commitEdit((current) => {
+            let nextMutations = current;
+            for (const oid of selectedObjectIds) {
+              nextMutations = addDeleteObject(nextMutations, oid);
+            }
+            return nextMutations;
+          });
+          setSelectedObjectIds(new Set());
         }
         return;
       }
@@ -664,6 +814,15 @@ export function App() {
       if (isConnectShortcut(e)) {
         e.preventDefault();
         if (!e.repeat) handleConnectSelected();
+        return;
+      }
+
+      // C = connect object to selected node
+      if (e.key === "c" && !e.ctrlKey && !e.metaKey) {
+        if (selectedObjectIds.size === 1 && selectedNodeIds.size === 1) {
+          e.preventDefault();
+          if (!e.repeat) handleConnectObjectToNode();
+        }
         return;
       }
 
@@ -675,8 +834,10 @@ export function App() {
     editMode,
     selectedNodeIds,
     selectedEdgeKey,
+    selectedObjectIds,
     handleDeselectAll,
     handleConnectSelected,
+    handleConnectObjectToNode,
     handleUndo,
     handleRedo,
     commitEdit,
@@ -690,6 +851,7 @@ export function App() {
         // Clear selections when leaving edit mode
         setSelectedNodeIds(new Set());
         setSelectedEdgeKey(null);
+        setSelectedObjectIds(new Set());
         return "view";
       }
       return "edit";
@@ -702,6 +864,7 @@ export function App() {
     setEditHistory(createHistory(emptyMutations()));
     setSelectedNodeIds(new Set());
     setSelectedEdgeKey(null);
+    setSelectedObjectIds(new Set());
     setBase("saved");
     if (snapshot) {
       try {
@@ -727,6 +890,7 @@ export function App() {
     setEditHistory(createHistory(emptyMutations()));
     setSelectedNodeIds(new Set());
     setSelectedEdgeKey(null);
+    setSelectedObjectIds(new Set());
     setBase("saved");
     setError(null);
   }, [snapshot]);
@@ -753,6 +917,7 @@ export function App() {
       setEditHistory(createHistory(emptyMutations()));
       setSelectedNodeIds(new Set());
       setSelectedEdgeKey(null);
+      setSelectedObjectIds(new Set());
       setBase("exported");
       setError(null);
     } catch (e: any) {
@@ -792,6 +957,11 @@ export function App() {
     [data, mutations],
   );
 
+  const effectiveTObjects = useMemo(
+    () => (data ? effectiveObjects(data.objects, mutations) : []),
+    [data, mutations],
+  );
+
   const renderedLayers = editMode === "edit" ? EDIT_ONLY_LAYERS : layers;
 
   return (
@@ -808,6 +978,7 @@ export function App() {
         onToggleEdit={handleToggleEdit}
         onReset={handleReset}
         onExport={handleExport}
+        onAddNode={() => setShowAddPanel(true)}
         onShowDiff={() => setShowDiff(true)}
         onHideDiff={() => setShowDiff(false)}
       />
@@ -903,6 +1074,31 @@ export function App() {
         />
       )}
 
+      {editMode === "edit" && selectedObjectIds.size === 1 && (
+        <ObjectPropertyPanel
+          object={effectiveTObjects.find((o) => selectedObjectIds.has(o.id))!}
+          onChangeLabel={(id, label) => {
+            commitEdit((current) => addUpdateObjectLabel(current, id, label));
+          }}
+          onDelete={(id) => {
+            commitEdit((current) => addDeleteObject(current, id));
+            setSelectedObjectIds(new Set());
+          }}
+        />
+      )}
+
+      {editMode === "edit" && showAddPanel && (
+        <AddNodePanel
+          onAdd={(areaId, x, y, z, size) => {
+            commitEdit((current) =>
+              addCreatePoly(current, areaId, [x, y, z], size),
+            );
+            setShowAddPanel(false);
+          }}
+          onCancel={() => setShowAddPanel(false)}
+        />
+      )}
+
       {editMode === "edit" && selectedNodeIds.size === 2 && (
         <div
           data-overlay
@@ -926,6 +1122,33 @@ export function App() {
           <span>2 nodes selected</span>
           <button type="button" onClick={handleConnectSelected}>
             Connect (E)
+          </button>
+        </div>
+      )}
+
+      {editMode === "edit" && selectedObjectIds.size === 1 && selectedNodeIds.size === 1 && (
+        <div
+          data-overlay
+          style={{
+            position: "absolute",
+            bottom: 16,
+            left: "50%",
+            transform: "translateX(-50%)",
+            zIndex: 20,
+            display: "flex",
+            alignItems: "center",
+            gap: 10,
+            padding: "7px 10px",
+            borderRadius: 6,
+            background: "rgba(0,0,0,0.82)",
+            color: "#ddd",
+            fontFamily: "monospace",
+            fontSize: 12,
+          }}
+        >
+          <span>Object + Node selected</span>
+          <button type="button" onClick={handleConnectObjectToNode}>
+            Connect (C)
           </button>
         </div>
       )}
@@ -1041,6 +1264,12 @@ export function App() {
               layers={layers}
               toggle={toggle}
             />
+            <Toggle
+              label="Objects"
+              k="objects"
+              layers={layers}
+              toggle={toggle}
+            />
 
             </div>
           )}
@@ -1141,13 +1370,16 @@ export function App() {
           effectiveNodes={effectiveTNodes}
           effectiveEdges={effectiveTEdges}
           effectivePolys={effectivePolys}
+          effectiveObjects={effectiveTObjects}
           layers={renderedLayers}
           selectedArea={selectedArea}
           selectedNodeIds={selectedNodeIds}
           selectedEdgeKey={selectedEdgeKey}
+          selectedObjectIds={selectedObjectIds}
           editMode={editMode === "edit"}
           onSelectNode={handleSelectNode}
           onSelectEdge={handleSelectEdge}
+          onSelectObject={handleSelectObject}
           onDeselectAll={handleDeselectAll}
           meshOpacity={meshOpacity}
         />

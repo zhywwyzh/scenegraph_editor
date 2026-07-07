@@ -10,6 +10,7 @@
  *
  *  TopologicalNode  — poly center, top-level renderable, CRUD target
  *  TopologicalEdge  — Poly↔Poly adjacency (from edges[] + connected_node_ids[])
+ *  SceneObject      — annotated object in the scene (label, position, point cloud)
  */
 
 export interface PreprocessedArea {
@@ -58,11 +59,23 @@ export interface TopologicalEdge {
   crossArea: boolean;
 }
 
+/** Annotated object in the scene: label, position, point-cloud reference */
+export interface SceneObject {
+  id: number;
+  label: string;
+  position: [number, number, number];
+  colorHex: string;
+  areaId: number;
+  /** father_poly_id from edge — the poly this object sits in */
+  fatherPolyId: number;
+}
+
 export interface SceneData {
   areas: PreprocessedArea[];
   polys: PreprocessedPoly[];
   topoNodes: TopologicalNode[];
   topoEdges: TopologicalEdge[];
+  objects: SceneObject[];
 }
 
 // ---- Mutations (sent to backend on export) ----
@@ -83,12 +96,25 @@ export interface CreatePoly {
   size: number;
 }
 
+export interface UpdateObjectLabel {
+  id: number;
+  label: string;
+}
+
+export interface UpdateObjectFatherPoly {
+  objectId: number;
+  fatherPolyId: number;
+}
+
 export interface Mutations {
   deletePolyIds: number[];
   movePoly: MovePoly[];
   removeEdges: EdgeRef[];
   addEdges: EdgeRef[];
   createPoly: CreatePoly[];
+  updateObjectLabels: UpdateObjectLabel[];
+  updateObjectFatherPolys: UpdateObjectFatherPoly[];
+  deleteObjectIds: number[];
 }
 
 export interface ExportRequest {

@@ -9,6 +9,7 @@ interface Props {
   onToggleEdit: () => void;
   onReset: () => void;
   onExport: () => void;
+  onAddNode: () => void;
   onShowDiff?: () => void;
   onHideDiff?: () => void;
 }
@@ -22,6 +23,7 @@ export function EditToolbar({
   onToggleEdit,
   onReset,
   onExport,
+  onAddNode,
   onShowDiff,
   onHideDiff,
 }: Props) {
@@ -66,6 +68,10 @@ export function EditToolbar({
         <>
           <span style={{ color: "#888" }}>|</span>
 
+          <button onClick={onAddNode} style={btnStyle} title="Add a new node at arbitrary XYZ">
+            Add Node
+          </button>
+
           <button
             onClick={onReset}
             style={btnStyle}
@@ -105,7 +111,7 @@ export function EditToolbar({
 
       {editing && (
         <span style={{ color: "#666", fontSize: 10, marginLeft: 4 }}>
-          Del=delete &middot; E=connect &middot; Esc=clear
+          Del=delete &middot; E=connect &middot; C=obj↔node &middot; Esc=clear
         </span>
       )}
     </div>

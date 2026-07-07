@@ -99,6 +99,7 @@ export function NodePropertyPanel({ node, onChangePosition }: Props) {
         nodePos={nodePos}
         commitAxis={commitAxis}
       />
+
     </div>
   );
 }

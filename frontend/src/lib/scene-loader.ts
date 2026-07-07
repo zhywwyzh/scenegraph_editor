@@ -1,4 +1,4 @@
-import type { PreprocessedArea, PreprocessedPoly, TopologicalNode, TopologicalEdge, SceneData } from "./types";
+import type { PreprocessedArea, PreprocessedPoly, TopologicalNode, TopologicalEdge, SceneObject, SceneData } from "./types";
 
 function hex(r: number, g: number, b: number): string {
   const t = (x: number) => ((x * 255) | 0).toString(16).padStart(2, "0");
@@ -132,5 +132,28 @@ export async function loadSceneGraph(path: string): Promise<SceneData> {
     };
   });
 
-  return { areas, polys, topoNodes, topoEdges };
+  // Poly → area lookup (for resolving object father_poly_id → area)
+  const polyAreaMap = new Map<number, number>();
+  for (const p of polys) polyAreaMap.set(p.id, p.areaId);
+
+  // Objects
+  const objects: SceneObject[] = (root.objects || []).map((o: any) => {
+    const rawColor = o.color || [230, 100, 30];
+    // Object colors are 0-255 ints; normalize to 0-1
+    const normR = c3(rawColor[0] / 255, 0.9);
+    const normG = c3(rawColor[1] / 255, 0.4);
+    const normB = c3(rawColor[2] / 255, 0.1);
+    const fatherPolyId = Number(o?.edge?.father_poly_id ?? -1);
+    const areaId = polyAreaMap.get(fatherPolyId) ?? -1;
+    return {
+      id: Number(o.id),
+      label: String(o.label ?? "None"),
+      position: asV3(o.pos),
+      colorHex: hex(normR, normG, normB),
+      areaId,
+      fatherPolyId,
+    };
+  });
+
+  return { areas, polys, topoNodes, topoEdges, objects };
 }

@@ -31,12 +31,25 @@ interface CreatePoly {
   size: number;
 }
 
+interface UpdateObjectLabel {
+  id: number;
+  label: string;
+}
+
+interface UpdateObjectFatherPoly {
+  objectId: number;
+  fatherPolyId: number;
+}
+
 interface Mutations {
   deletePolyIds: number[];
   movePoly: MovePoly[];
   removeEdges: EdgeRef[];
   addEdges: EdgeRef[];
   createPoly: CreatePoly[];
+  updateObjectLabels: UpdateObjectLabel[];
+  updateObjectFatherPolys: UpdateObjectFatherPoly[];
+  deleteObjectIds: number[];
 }
 
 interface ExportRequest {
@@ -66,6 +79,9 @@ function applyMutations(root: any, mutations: Mutations): void {
   applyRemoveEdges(root, mutations.removeEdges);
   applyAddEdges(root, mutations.addEdges);
   applyCreatePolys(root, mutations.createPoly);
+  applyUpdateObjectLabels(root, mutations.updateObjectLabels);
+  applyUpdateObjectFatherPolys(root, mutations.updateObjectFatherPolys);
+  applyDeleteObjects(root, mutations.deleteObjectIds);
   rebuildCounters(root);
 }
 
@@ -338,6 +354,69 @@ function applyCreatePolys(root: any, creates: CreatePoly[]): void {
       if (!area.poly_ids) area.poly_ids = [];
       area.poly_ids.push(polyId);
     }
+  }
+}
+
+function applyUpdateObjectLabels(root: any, updates: UpdateObjectLabel[]): void {
+  if (updates.length === 0) return;
+  const objMap = new Map<number, any>();
+  for (const o of root.objects || []) objMap.set(Number(o.id), o);
+
+  for (const u of updates) {
+    const obj = objMap.get(u.id);
+    if (!obj) continue;
+    obj.label = u.label;
+  }
+}
+
+function applyDeleteObjects(root: any, ids: number[]): void {
+  if (ids.length === 0) return;
+  const idSet = new Set(ids);
+
+  // Remove objects
+  root.objects = (root.objects || []).filter(
+    (o: any) => !idSet.has(Number(o.id)),
+  );
+
+  // Clean poly.object_ids references
+  for (const poly of root.polyhedrons || []) {
+    poly.object_ids = (poly.object_ids || []).filter(
+      (oid: any) => !idSet.has(Number(oid)),
+    );
+  }
+
+  // Clean area.object_ids references
+  for (const area of root.areas || []) {
+    area.object_ids = (area.object_ids || []).filter(
+      (oid: any) => !idSet.has(Number(oid)),
+    );
+  }
+
+  // Clean cross-object edge references
+  for (const obj of root.objects || []) {
+    const edge = obj.edge || {};
+    const fid = Number(edge.father_object_id ?? -1);
+    if (idSet.has(fid)) {
+      edge.father_object_id = -1;
+      if (!obj.edge) obj.edge = edge;
+    }
+    edge.child_object_ids = (edge.child_object_ids || []).filter(
+      (cid: any) => !idSet.has(Number(cid)),
+    );
+    if (obj.edge) obj.edge = edge;
+  }
+}
+
+function applyUpdateObjectFatherPolys(root: any, updates: UpdateObjectFatherPoly[]): void {
+  if (updates.length === 0) return;
+  const objMap = new Map<number, any>();
+  for (const o of root.objects || []) objMap.set(Number(o.id), o);
+
+  for (const u of updates) {
+    const obj = objMap.get(u.objectId);
+    if (!obj) continue;
+    if (!obj.edge) obj.edge = {};
+    obj.edge.father_poly_id = u.fatherPolyId;
   }
 }
 
