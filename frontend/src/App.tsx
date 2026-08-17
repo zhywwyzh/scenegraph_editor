@@ -17,9 +17,11 @@ import { NodePropertyPanel } from "./components/NodePropertyPanel";
 import { ObjectsLayer } from "./components/ObjectsLayer";
 import { ObjectPropertyPanel } from "./components/ObjectPropertyPanel";
 import { AddNodePanel } from "./components/AddNodePanel";
+import { PointCloudLayer, type PcdColorScheme, SCHEME_LABELS } from "./components/PointCloudLayer";
 import { loadSceneGraph } from "./lib/scene-loader";
+import { loadPcd } from "./lib/pcd-loader";
 import { pickTarget } from "./lib/picking";
-import type { PickTarget } from "./lib/picking";
+import type { PickTarget, PickKind } from "./lib/picking";
 import {
   isConnectShortcut,
   isRedoShortcut,
@@ -219,6 +221,7 @@ function ClickHandler({
   onSelectObject,
   onDeselectAll,
   onHoverTarget,
+  selectableKinds,
 }: {
   nodes: TopologicalNode[];
   edges: TopologicalEdge[];
@@ -230,6 +233,7 @@ function ClickHandler({
   onSelectObject: (id: number, additive: boolean) => void;
   onDeselectAll: () => void;
   onHoverTarget: (target: PickTarget) => void;
+  selectableKinds: Set<PickKind>;
 }) {
   const { gl, camera } = useThree();
 
@@ -255,6 +259,7 @@ function ClickHandler({
         nodes,
         edges,
         objects,
+        selectableKinds,
         camera,
         sceneMatrixWorld: sceneGroup.matrixWorld,
         width: rect.width,
@@ -344,6 +349,7 @@ function ClickHandler({
     onSelectObject,
     onDeselectAll,
     onHoverTarget,
+    selectableKinds,
   ]);
 
   return null;
@@ -368,6 +374,14 @@ function Scene({
   onSelectObject,
   onDeselectAll,
   meshOpacity,
+  pcdLayers,
+  pcdPointSize,
+  pcdColorScheme,
+  nodeSize,
+  topoEdgeThickness,
+  objectSize,
+  objectLineThickness,
+  selectableKinds,
 }: {
   data: SceneData;
   effectiveNodes: TopologicalNode[];
@@ -385,6 +399,14 @@ function Scene({
   onSelectObject: (id: number, additive: boolean) => void;
   onDeselectAll: () => void;
   meshOpacity: number;
+  pcdLayers: { key: string; positions: Float32Array; colorHex: string }[];
+  pcdPointSize: number;
+  pcdColorScheme: PcdColorScheme;
+  nodeSize: number;
+  topoEdgeThickness: number;
+  objectSize: number;
+  objectLineThickness: number;
+  selectableKinds: Set<PickKind>;
 }) {
   const sceneGroupRef = useRef<THREE.Group>(null);
   const [hoverTarget, setHoverTarget] = useState<PickTarget>(null);
@@ -454,6 +476,7 @@ function Scene({
             selectedArea={selectedArea}
             selectedEdgeKey={selectedEdgeKey}
             hoveredEdgeKey={hoverTarget?.kind === "edge" ? hoverTarget.key : null}
+            edgeThickness={topoEdgeThickness}
           />
         )}
         {layers.topoNodes && (
@@ -463,6 +486,7 @@ function Scene({
             selectedArea={selectedArea}
             selectedNodeIds={selectedNodeIds}
             hoveredNodeId={hoverTarget?.kind === "node" ? hoverTarget.id : null}
+            nodeSize={nodeSize}
           />
         )}
         {layers.objects && (
@@ -473,8 +497,19 @@ function Scene({
             selectedArea={selectedArea}
             selectedObjectIds={selectedObjectIds}
             hoveredObjectId={hoverTarget?.kind === "object" ? hoverTarget.id : null}
+            objectSize={objectSize}
+            lineThickness={objectLineThickness}
           />
         )}
+        {pcdLayers.map((layer) => (
+          <PointCloudLayer
+            key={layer.key}
+            positions={layer.positions}
+            colorHex={layer.colorHex}
+            pointSize={pcdPointSize}
+            colorScheme={pcdColorScheme}
+          />
+        ))}
         {/* Click handler: processes node/edge/object selection. */}
         <ClickHandler
           nodes={layers.topoNodes ? tNodes : []}
@@ -487,6 +522,7 @@ function Scene({
           onSelectObject={onSelectObject}
           onDeselectAll={onDeselectAll}
           onHoverTarget={handleHoverTarget}
+          selectableKinds={selectableKinds}
         />
       </group>
 
@@ -502,6 +538,24 @@ function Scene({
 }
 
 // ---- app ----
+
+function useLocalStorageState<T>(key: string, fallback: T): [T, (v: T) => void] {
+  const [value, setValue] = useState<T>(() => {
+    try {
+      const stored = localStorage.getItem(`sge_${key}`);
+      if (stored !== null) return JSON.parse(stored) as T;
+    } catch {}
+    return fallback;
+  });
+  const set = useCallback(
+    (v: T) => {
+      setValue(v);
+      try { localStorage.setItem(`sge_${key}`, JSON.stringify(v)); } catch {}
+    },
+    [key],
+  );
+  return [value, set];
+}
 
 export function App() {
   const [data, setData] = useState<SceneData | null>(null);
@@ -541,6 +595,41 @@ export function App() {
   const [connectionNotice, setConnectionNotice] =
     useState<ConnectionNotice | null>(null);
   const [showAddPanel, setShowAddPanel] = useState(false);
+
+  // PCD point cloud loading
+  // null = none, "all" = all objects, "scene:NAME" = scene PCD, number = specific object
+  const [selectedPcd, setSelectedPcd] = useState<string | null>(null);
+  const [pcdLayers, setPcdLayers] = useState<{ key: string; positions: Float32Array; colorHex: string }[]>([]);
+  const [pcdLoading, setPcdLoading] = useState(false);
+  const [scenePcds, setScenePcds] = useState<string[]>([]);
+
+  // Display controls
+  const [nodeSize, setNodeSize] = useLocalStorageState("disp_nodeSize", 0.12);
+  const [topoEdgeThickness, setTopoEdgeThickness] = useLocalStorageState("disp_topoEdge", 1);
+  const [objectSize, setObjectSize] = useLocalStorageState("disp_objSize", 0.15);
+  const [objectLineThickness, setObjectLineThickness] = useLocalStorageState("disp_objLine", 0.04);
+  const [pcdColorScheme, setPcdColorScheme] = useLocalStorageState<PcdColorScheme>("disp_pcdScheme", "flat");
+  const [pcdPointSize, setPcdPointSize] = useLocalStorageState("disp_pcdPtSize", 0.06);
+
+  // Selection filter
+  const [selectableKinds, setSelectableKinds] = useState<Set<PickKind>>(
+    new Set(["node", "edge", "object"] as PickKind[]),
+  );
+  const toggleSelectable = useCallback((k: PickKind) => {
+    setSelectableKinds((prev) => {
+      const next = new Set(prev);
+      if (next.has(k)) next.delete(k); else next.add(k);
+      return next;
+    });
+  }, []);
+
+  // Fetch available scene-level PCDs
+  useEffect(() => {
+    fetch("/api/scene-pcds")
+      .then((r) => r.json())
+      .then((j) => setScenePcds((j.files || []).map((f: any) => f.name)))
+      .catch(() => {});
+  }, []);
 
   const mutations = editHistory.present;
 
@@ -593,7 +682,66 @@ export function App() {
     })();
   }, [snapshot]);
 
-  // ---- node selection ----
+  // Load PCD point cloud(s) when selection changes
+  useEffect(() => {
+    if (selectedPcd === null || !data) {
+      setPcdLayers([]);
+      return;
+    }
+
+    if (selectedPcd === "all") {
+      // Load all object clouds in parallel
+      setPcdLoading(true);
+      const objectsWithCloud = data.objects.filter((o) => o.cloudPath);
+      Promise.all(
+        objectsWithCloud.map((obj) =>
+          loadPcd(`/api/pcd?snapshot=${encodeURIComponent(snapshot)}&path=${encodeURIComponent(obj.cloudPath)}`)
+            .then((r) => ({ key: `obj-${obj.id}`, positions: r.positions, colorHex: obj.colorHex }))
+            .catch((e) => {
+              console.warn(`PCD load failed for object ${obj.id}:`, e);
+              return null;
+            })
+        ),
+      ).then((results) => {
+        setPcdLayers(results.filter((r): r is NonNullable<typeof r> => r !== null));
+        setPcdLoading(false);
+      });
+    } else if (selectedPcd.startsWith("scene:")) {
+      // Load scene-level PCD
+      const name = selectedPcd.slice(6);
+      setPcdLoading(true);
+      loadPcd(`/api/pcd?source=scene&name=${encodeURIComponent(name)}`)
+        .then((r) => {
+          setPcdLayers([{ key: "scene", positions: r.positions, colorHex: "#aaccff" }]);
+          setPcdLoading(false);
+        })
+        .catch((e) => {
+          console.warn("Scene PCD load failed:", e);
+          setPcdLayers([]);
+          setPcdLoading(false);
+        });
+    } else {
+      // Load single object cloud
+      const objId = Number(selectedPcd);
+      const obj = data.objects.find((o) => o.id === objId);
+      if (!obj || !obj.cloudPath) {
+        setPcdLayers([]);
+        return;
+      }
+      const url = `/api/pcd?snapshot=${encodeURIComponent(snapshot)}&path=${encodeURIComponent(obj.cloudPath)}`;
+      setPcdLoading(true);
+      loadPcd(url)
+        .then((result) => {
+          setPcdLayers([{ key: `obj-${obj.id}`, positions: result.positions, colorHex: obj.colorHex }]);
+          setPcdLoading(false);
+        })
+        .catch((e) => {
+          console.warn("PCD load failed:", e);
+          setPcdLayers([]);
+          setPcdLoading(false);
+        });
+    }
+  }, [selectedPcd, snapshot, data]);
 
   const handleSelectNode = useCallback(
     (id: number, additive: boolean) => {
@@ -1271,6 +1419,108 @@ export function App() {
               toggle={toggle}
             />
 
+            {/* PCD point-cloud selector */}
+            <div style={{ margin: "6px 0 4px", borderTop: "1px solid #333" }} />
+            <div style={{ fontSize: 10, color: "#888", marginBottom: 4 }}>
+              Point Cloud
+            </div>
+            <select
+              value={selectedPcd ?? ""}
+              onChange={(e) => {
+                const v = e.target.value;
+                setSelectedPcd(v === "" ? null : v);
+              }}
+              style={{
+                width: "100%",
+                background: "#1a1a2e",
+                color: "#ddd",
+                border: "1px solid #555",
+                borderRadius: 4,
+                padding: "3px 4px",
+                fontFamily: "monospace",
+                fontSize: 11,
+              }}
+            >
+              <option value="">None</option>
+              <optgroup label="Scene Clouds">
+                {scenePcds.map((name) => (
+                  <option key={`scene:${name}`} value={`scene:${name}`}>
+                    ◆ {name}
+                  </option>
+                ))}
+              </optgroup>
+              <optgroup label="All Objects">
+                <option value="all">★ All Objects</option>
+              </optgroup>
+              <optgroup label="Per Object">
+                {data.objects.map((o) => (
+                  <option key={o.id} value={String(o.id)}>
+                    [{o.id}] {o.label}
+                  </option>
+                ))}
+              </optgroup>
+            </select>
+            {pcdLoading && (
+              <div style={{ fontSize: 10, color: "#888", marginTop: 3 }}>
+                Loading...
+              </div>
+            )}
+            {pcdLayers.length > 0 && !pcdLoading && (
+              <>
+                <div style={{ fontSize: 10, color: "#888", marginTop: 3 }}>
+                  {pcdLayers.reduce((s, l) => s + l.positions.length / 3, 0)} points
+                </div>
+                <input
+                  type="range"
+                  min={1}
+                  max={30}
+                  value={Math.round(pcdPointSize * 100)}
+                  onChange={(e) => setPcdPointSize(Number(e.target.value) / 100)}
+                  style={{ width: "100%", accentColor: "#3498db", height: 4 }}
+                />
+              </>
+            )}
+
+            {/* PCD color scheme */}
+            <div style={{ marginTop: 6 }}>
+              <select
+                value={pcdColorScheme}
+                onChange={(e) => setPcdColorScheme(e.target.value as PcdColorScheme)}
+                style={{
+                  width: "100%",
+                  background: "#1a1a2e",
+                  color: "#ddd",
+                  border: "1px solid #555",
+                  borderRadius: 4,
+                  padding: "2px 4px",
+                  fontFamily: "monospace",
+                  fontSize: 10,
+                }}
+              >
+                {Object.entries(SCHEME_LABELS).map(([k, v]) => (
+                  <option key={k} value={k}>{v}</option>
+                ))}
+              </select>
+            </div>
+
+            {/* Display tweaks */}
+            <div style={{ margin: "6px 0 4px", borderTop: "1px solid #333" }} />
+            <div style={{ fontSize: 10, color: "#888", marginBottom: 4 }}>
+              Selection Filter
+            </div>
+            <SelectToggle label="Nodes" kind="node" selectableKinds={selectableKinds} toggle={toggleSelectable} />
+            <SelectToggle label="Edges" kind="edge" selectableKinds={selectableKinds} toggle={toggleSelectable} />
+            <SelectToggle label="Objects" kind="object" selectableKinds={selectableKinds} toggle={toggleSelectable} />
+
+            <div style={{ margin: "6px 0 4px", borderTop: "1px solid #333" }} />
+            <div style={{ fontSize: 10, color: "#888", marginBottom: 4 }}>
+              Display
+            </div>
+            <Slider label="Node size" value={nodeSize} min={0.02} max={0.50} step={0.01} onChange={setNodeSize} />
+            <Slider label="Edge thick" value={topoEdgeThickness} min={0.5} max={4.0} step={0.5} onChange={setTopoEdgeThickness} />
+            <Slider label="Object size" value={objectSize} min={0.02} max={0.50} step={0.01} onChange={setObjectSize} />
+            <Slider label="Obj line" value={objectLineThickness} min={0.01} max={0.20} step={0.005} onChange={setObjectLineThickness} />
+
             </div>
           )}
 
@@ -1382,6 +1632,14 @@ export function App() {
           onSelectObject={handleSelectObject}
           onDeselectAll={handleDeselectAll}
           meshOpacity={meshOpacity}
+          pcdLayers={pcdLayers}
+          pcdPointSize={pcdPointSize}
+          pcdColorScheme={pcdColorScheme}
+          nodeSize={nodeSize}
+          topoEdgeThickness={topoEdgeThickness}
+          objectSize={objectSize}
+          objectLineThickness={objectLineThickness}
+          selectableKinds={selectableKinds}
         />
       ) : loading ? (
         <div
@@ -1408,6 +1666,75 @@ export function App() {
 }
 
 // ---- Toggle & ErrorBanner ----
+
+function Slider({
+  label,
+  value,
+  min,
+  max,
+  step = 1,
+  onChange,
+}: {
+  label: string;
+  value: number;
+  min: number;
+  max: number;
+  step?: number;
+  onChange: (v: number) => void;
+}) {
+  return (
+    <div style={{ marginTop: 2 }}>
+      <div style={{ display: "flex", justifyContent: "space-between", fontSize: 10, color: "#888" }}>
+        <span>{label}</span>
+        <span>{value.toFixed(2)}</span>
+      </div>
+      <input
+        type="range"
+        min={min}
+        max={max}
+        step={step}
+        value={value}
+        onChange={(e) => onChange(Number(e.target.value))}
+        style={{ width: "100%", accentColor: "#3498db", height: 4 }}
+      />
+    </div>
+  );
+}
+
+function SelectToggle({
+  label,
+  kind,
+  selectableKinds,
+  toggle,
+}: {
+  label: string;
+  kind: PickKind;
+  selectableKinds: Set<PickKind>;
+  toggle: (k: PickKind) => void;
+}) {
+  return (
+    <label
+      style={{
+        display: "flex",
+        alignItems: "center",
+        gap: 8,
+        padding: "2px 0",
+        cursor: "pointer",
+        fontSize: 11,
+      }}
+    >
+      <input
+        type="checkbox"
+        checked={selectableKinds.has(kind)}
+        onChange={() => toggle(kind)}
+        style={{ accentColor: "#3498db" }}
+      />
+      <span style={{ color: selectableKinds.has(kind) ? "#ccc" : "#555" }}>
+        {label}
+      </span>
+    </label>
+  );
+}
 
 function Toggle({
   label,

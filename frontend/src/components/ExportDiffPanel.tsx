@@ -170,8 +170,8 @@ export function ExportDiffPanel({ snapshot, onClose }: Props) {
             <group rotation={[-Math.PI / 2, 0, 0]}>
               <gridHelper args={[80, 80, "#333", "#222"]} />
             </group>
-            <TopologicalNodes nodes={saved.topoNodes} visible selectedArea={null} selectedNodeIds={new Set()} hoveredNodeId={null} />
-            <TopologicalEdges edges={saved.topoEdges} visible selectedArea={null} selectedEdgeKey={null} hoveredEdgeKey={null} />
+            <TopologicalNodes nodes={saved.topoNodes} visible selectedArea={null} selectedNodeIds={new Set()} hoveredNodeId={null} nodeSize={0.12} />
+            <TopologicalEdges edges={saved.topoEdges} visible selectedArea={null} selectedEdgeKey={null} hoveredEdgeKey={null} edgeThickness={1} />
           </Canvas>
         </div>
         <div style={{ flex: 1, position: "relative" }}>
@@ -185,8 +185,8 @@ export function ExportDiffPanel({ snapshot, onClose }: Props) {
             <group rotation={[-Math.PI / 2, 0, 0]}>
               <gridHelper args={[80, 80, "#333", "#222"]} />
             </group>
-            <TopologicalNodes nodes={exported.topoNodes} visible selectedArea={null} selectedNodeIds={new Set()} hoveredNodeId={null} />
-            <TopologicalEdges edges={exported.topoEdges} visible selectedArea={null} selectedEdgeKey={null} hoveredEdgeKey={null} />
+            <TopologicalNodes nodes={exported.topoNodes} visible selectedArea={null} selectedNodeIds={new Set()} hoveredNodeId={null} nodeSize={0.12} />
+            <TopologicalEdges edges={exported.topoEdges} visible selectedArea={null} selectedEdgeKey={null} hoveredEdgeKey={null} edgeThickness={1} />
           </Canvas>
         </div>
       </div>

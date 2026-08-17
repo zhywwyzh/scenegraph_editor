@@ -7,12 +7,12 @@ interface Props {
   selectedArea: number | null;
   selectedNodeIds: Set<number>;
   hoveredNodeId: number | null;
+  nodeSize: number;
 }
 
 /**
  * Topological nodes rendered as batch points.
  * Selected and hovered nodes get highlight spheres.
- * Click handling is done by the parent ClickHandler component.
  */
 export function TopologicalNodes({
   nodes,
@@ -20,6 +20,7 @@ export function TopologicalNodes({
   selectedArea,
   selectedNodeIds,
   hoveredNodeId,
+  nodeSize,
 }: Props) {
   const groups = useMemo(() => {
     const byArea = new Map<number, TopologicalNode[]>();
@@ -55,6 +56,9 @@ export function TopologicalNodes({
 
   if (!visible) return null;
 
+  const selRadius = nodeSize * 1.6;
+  const hovRadius = nodeSize * 1.35;
+
   return (
     <>
       {/* Batch points */}
@@ -65,7 +69,7 @@ export function TopologicalNodes({
           </bufferGeometry>
           <pointsMaterial
             color={color}
-            size={0.12}
+            size={nodeSize}
             sizeAttenuation
             transparent
             opacity={dimmed ? 0.2 : 0.85}
@@ -77,14 +81,14 @@ export function TopologicalNodes({
       {/* Selected node highlights */}
       {selectedNodes.map((n) => (
         <mesh key={`sel-${n.id}`} position={n.position}>
-          <sphereGeometry args={[0.2, 16, 10]} />
+          <sphereGeometry args={[selRadius, 16, 10]} />
           <meshBasicMaterial color="#ffaa00" transparent opacity={0.9} depthTest />
         </mesh>
       ))}
 
       {hoveredNode && (
         <mesh position={hoveredNode.position}>
-          <sphereGeometry args={[0.17, 16, 10]} />
+          <sphereGeometry args={[hovRadius, 16, 10]} />
           <meshBasicMaterial
             color="#00e5ff"
             transparent

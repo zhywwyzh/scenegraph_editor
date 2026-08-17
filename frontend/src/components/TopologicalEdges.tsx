@@ -8,12 +8,12 @@ interface Props {
   selectedArea: number | null;
   selectedEdgeKey: string | null;
   hoveredEdgeKey: string | null;
+  edgeThickness: number;
 }
 
 /**
  * Inter-node adjacency lines with vertexColors.
- * Click handling is done by the parent ClickHandler component.
- * Selected edge is highlighted in red.
+ * edgeThickness controls opacity and linewidth.
  */
 export function TopologicalEdges({
   edges,
@@ -21,6 +21,7 @@ export function TopologicalEdges({
   selectedArea,
   selectedEdgeKey,
   hoveredEdgeKey,
+  edgeThickness,
 }: Props) {
   const lines = useMemo(() => {
     const pos = new Float32Array(edges.length * 2 * 3);
@@ -61,14 +62,14 @@ export function TopologicalEdges({
           <bufferAttribute attach="attributes-position" args={[lines.positions, 3] as [Float32Array, number]} count={lines.count} />
           <bufferAttribute attach="attributes-color" args={[lines.colors, 3] as [Float32Array, number]} count={lines.count} />
         </bufferGeometry>
-        <lineBasicMaterial vertexColors transparent opacity={selectedArea !== null ? 0.25 : 0.45} linewidth={1} depthTest />
+        <lineBasicMaterial vertexColors transparent opacity={selectedArea !== null ? 0.25 * edgeThickness : 0.45 * edgeThickness} linewidth={edgeThickness} depthTest />
       </lineSegments>
 
       {hoveredLine && (
         <Line
           points={hoveredLine}
           color="#00e5ff"
-          lineWidth={3}
+          lineWidth={2 + edgeThickness}
           transparent
           opacity={0.95}
           depthTest={false}
@@ -79,7 +80,7 @@ export function TopologicalEdges({
         <Line
           points={selectedLine}
           color="#ff3333"
-          lineWidth={3}
+          lineWidth={2 + edgeThickness}
           transparent
           opacity={0.95}
           depthTest

@@ -11,10 +11,14 @@ export type PickTarget =
   | { kind: "object"; id: number }
   | null;
 
+export type PickKind = "node" | "edge" | "object";
+
 interface PickOptions {
   nodes: TopologicalNode[];
   edges: TopologicalEdge[];
   objects?: SceneObject[];
+  /** If set, only these kinds are considered for picking. */
+  selectableKinds?: Set<PickKind>;
   camera: THREE.Camera;
   sceneMatrixWorld: THREE.Matrix4;
   width: number;
@@ -65,6 +69,7 @@ export function pickTarget({
   nodes,
   edges,
   objects,
+  selectableKinds,
   camera,
   sceneMatrixWorld,
   width,
@@ -99,53 +104,51 @@ export function pickTarget({
     return point;
   };
 
-  for (const node of nodes) {
-    const point = projectPoint(`n_${node.id}`, node.position);
-    if (!point) continue;
+  const canPick = (k: PickKind) => !selectableKinds || selectableKinds.has(k);
 
-    const distance = Math.hypot(pointerX - point.x, pointerY - point.y);
-    if (distance > nodeRadiusPx) continue;
-    best = chooseBetter(best, {
-      target: { kind: "node", id: node.id },
-      score: distance / nodeRadiusPx,
-      depth: point.depth,
-    });
+  if (canPick("node")) {
+    for (const node of nodes) {
+      const point = projectPoint(`n_${node.id}`, node.position);
+      if (!point) continue;
+      const distance = Math.hypot(pointerX - point.x, pointerY - point.y);
+      if (distance > nodeRadiusPx) continue;
+      best = chooseBetter(best, {
+        target: { kind: "node", id: node.id },
+        score: distance / nodeRadiusPx,
+        depth: point.depth,
+      });
+    }
   }
 
-  for (const edge of edges) {
-    const start = projectPoint(`n_${edge.srcId}`, edge.srcPos);
-    const end = projectPoint(`n_${edge.dstId}`, edge.dstPos);
-    if (!start || !end) continue;
-
-    const distance = pointToSegmentDistance(
-      pointerX,
-      pointerY,
-      start.x,
-      start.y,
-      end.x,
-      end.y,
-    );
-    if (distance > edgeRadiusPx) continue;
-
-    best = chooseBetter(best, {
-      target: { kind: "edge", key: canonicalEdgeKey(edge.srcId, edge.dstId) },
-      score: distance / edgeRadiusPx,
-      depth: (start.depth + end.depth) * 0.5,
-    });
+  if (canPick("edge")) {
+    for (const edge of edges) {
+      const start = projectPoint(`n_${edge.srcId}`, edge.srcPos);
+      const end = projectPoint(`n_${edge.dstId}`, edge.dstPos);
+      if (!start || !end) continue;
+      const distance = pointToSegmentDistance(
+        pointerX, pointerY, start.x, start.y, end.x, end.y,
+      );
+      if (distance > edgeRadiusPx) continue;
+      best = chooseBetter(best, {
+        target: { kind: "edge", key: canonicalEdgeKey(edge.srcId, edge.dstId) },
+        score: distance / edgeRadiusPx,
+        depth: (start.depth + end.depth) * 0.5,
+      });
+    }
   }
 
-  // Object picking — similar to node picking
-  for (const obj of objects ?? []) {
-    const point = projectPoint(`o_${obj.id}`, obj.position);
-    if (!point) continue;
-
-    const distance = Math.hypot(pointerX - point.x, pointerY - point.y);
-    if (distance > objectRadiusPx) continue;
-    best = chooseBetter(best, {
-      target: { kind: "object", id: obj.id },
-      score: distance / objectRadiusPx,
-      depth: point.depth,
-    });
+  if (canPick("object")) {
+    for (const obj of objects ?? []) {
+      const point = projectPoint(`o_${obj.id}`, obj.position);
+      if (!point) continue;
+      const distance = Math.hypot(pointerX - point.x, pointerY - point.y);
+      if (distance > objectRadiusPx) continue;
+      best = chooseBetter(best, {
+        target: { kind: "object", id: obj.id },
+        score: distance / objectRadiusPx,
+        depth: point.depth,
+      });
+    }
   }
 
   return best?.target ?? null;

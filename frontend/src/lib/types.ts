@@ -68,6 +68,8 @@ export interface SceneObject {
   areaId: number;
   /** father_poly_id from edge — the poly this object sits in */
   fatherPolyId: number;
+  /** Relative path to the point cloud file, e.g. "objects/object_0_cloud.pcd" */
+  cloudPath: string;
 }
 
 export interface SceneData {

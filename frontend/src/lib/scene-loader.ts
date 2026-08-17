@@ -145,6 +145,7 @@ export async function loadSceneGraph(path: string): Promise<SceneData> {
     const normB = c3(rawColor[2] / 255, 0.1);
     const fatherPolyId = Number(o?.edge?.father_poly_id ?? -1);
     const areaId = polyAreaMap.get(fatherPolyId) ?? -1;
+    const cloudPath = String(o?.files?.cloud ?? "");
     return {
       id: Number(o.id),
       label: String(o.label ?? "None"),
@@ -152,6 +153,7 @@ export async function loadSceneGraph(path: string): Promise<SceneData> {
       colorHex: hex(normR, normG, normB),
       areaId,
       fatherPolyId,
+      cloudPath,
     };
   });
 

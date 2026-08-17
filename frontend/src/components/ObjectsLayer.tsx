@@ -11,6 +11,8 @@ interface Props {
   selectedArea: number | null;
   selectedObjectIds: Set<number>;
   hoveredObjectId: number | null;
+  objectSize: number;
+  lineThickness: number;
 }
 
 /**
@@ -24,6 +26,8 @@ export function ObjectsLayer({
   selectedArea,
   selectedObjectIds,
   hoveredObjectId,
+  objectSize,
+  lineThickness,
 }: Props) {
   // Batch-render spheres grouped by area for performance
   const groups = useMemo(() => {
@@ -86,7 +90,7 @@ export function ObjectsLayer({
           </bufferGeometry>
           <pointsMaterial
             color={color}
-            size={0.15}
+            size={objectSize}
             sizeAttenuation
             transparent
             opacity={dimmed ? 0.2 : 0.9}
@@ -98,7 +102,7 @@ export function ObjectsLayer({
       {/* Selected object highlights */}
       {selectedObjects.map((o) => (
         <mesh key={`obj-sel-${o.id}`} position={o.position}>
-          <sphereGeometry args={[0.25, 16, 10]} />
+          <sphereGeometry args={[objectSize * 1.6, 16, 10]} />
           <meshBasicMaterial color="#ffaa00" transparent opacity={0.9} depthTest />
         </mesh>
       ))}
@@ -106,7 +110,7 @@ export function ObjectsLayer({
       {/* Hovered object highlight */}
       {hoveredObject && (
         <mesh position={hoveredObject.position}>
-          <sphereGeometry args={[0.22, 16, 10]} />
+          <sphereGeometry args={[objectSize * 1.4, 16, 10]} />
           <meshBasicMaterial
             color="#00e5ff"
             transparent
@@ -122,6 +126,7 @@ export function ObjectsLayer({
           key={`conn-${objId}`}
           start={objPos}
           end={nodePos}
+          radius={lineThickness}
         />
       ))}
 
@@ -160,9 +165,11 @@ export function ObjectsLayer({
 function ConnectionCylinder({
   start,
   end,
+  radius,
 }: {
   start: [number, number, number];
   end: [number, number, number];
+  radius: number;
 }) {
   const sx = start[0], sy = start[1], sz = start[2];
   const ex = end[0], ey = end[1], ez = end[2];
@@ -193,7 +200,7 @@ function ConnectionCylinder({
 
   return (
     <mesh position={mid} quaternion={quaternion}>
-      <cylinderGeometry args={[0.04, 0.04, length, 6]} />
+      <cylinderGeometry args={[radius, radius, length, 6]} />
       <meshBasicMaterial color="#22cc44" transparent opacity={0.75} depthTest />
     </mesh>
   );

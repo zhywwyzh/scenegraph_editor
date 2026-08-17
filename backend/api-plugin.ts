@@ -652,6 +652,64 @@ export function apiPlugin(): Plugin {
           }
         },
       );
+
+      // Serve PCD point-cloud files
+      // ?snapshot=X&path=objects/object_N_cloud.pcd  → per-object
+      // ?source=scene&name=2026-06-29-all-newmap.pcd → top-level scene
+      server.middlewares.use(
+        "/api/pcd",
+        async (req: IncomingMessage, res: ServerResponse) => {
+          if (req.method !== "GET") {
+            sendJson(res, 405, { success: false, error: "Method not allowed" });
+            return;
+          }
+          try {
+            const url = new URL(req.url || "", `http://${req.headers.host || "localhost"}`);
+            const source = url.searchParams.get("source") || "snapshot";
+            let filePath: string;
+            if (source === "scene") {
+              const name = url.searchParams.get("name");
+              if (!name || name.includes("..") || name.includes("/")) {
+                sendJson(res, 400, { success: false, error: "Invalid name" });
+                return;
+              }
+              filePath = join(PROJECT_ROOT, "pcd", name);
+            } else {
+              const snapshot = url.searchParams.get("snapshot");
+              const relPath = url.searchParams.get("path");
+              if (!snapshot || !relPath || relPath.includes("..") || relPath.startsWith("/")) {
+                sendJson(res, 400, { success: false, error: "Missing/invalid snapshot or path" });
+                return;
+              }
+              filePath = join(PROJECT_ROOT, "scene_graph_saved", snapshot, relPath);
+            }
+            const data = readFileSync(filePath);
+            res.writeHead(200, {
+              "Content-Type": "application/octet-stream",
+              "Content-Length": data.length,
+            });
+            res.end(data);
+          } catch (err: any) {
+            sendJson(res, 500, { success: false, error: err.message });
+          }
+        },
+      );
+
+      // List scene-level PCD files in top-level pcd/ directory
+      server.middlewares.use(
+        "/api/scene-pcds",
+        async (_req: IncomingMessage, res: ServerResponse) => {
+          try {
+            const pcdDir = join(PROJECT_ROOT, "pcd");
+            const files = readdirSync(pcdDir)
+              .filter((f) => f.endsWith(".pcd"))
+              .map((f) => ({ name: f }));
+            sendJson(res, 200, { files });
+          } catch (err: any) {
+            sendJson(res, 500, { success: false, error: err.message });
+          }
+        },
+      );
     },
   };
 }
