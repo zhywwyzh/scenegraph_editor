@@ -1,6 +1,6 @@
 /**
  * Lightweight event logger. Mirrors key UI events to the browser console and
- * to the backend log file (logs/YYYY-MM-DD.log) via a fire-and-forget POST,
+ * to the backend log file (logs/YYYY-MM-DD_HH-MM-SS.log) via a fire-and-forget POST,
  * so issues like failed exports or broken undo can be diagnosed after the fact.
  */
 

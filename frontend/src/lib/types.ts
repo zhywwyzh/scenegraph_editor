@@ -123,6 +123,8 @@ export interface Mutations {
   updateObjectFatherPolys: UpdateObjectFatherPoly[];
   updateObjectIds: UpdateObjectId[];
   deleteObjectIds: number[];
+  /** Desired order of object ids (original ids) for export */
+  objectOrder: number[];
 }
 
 export interface ExportRequest {

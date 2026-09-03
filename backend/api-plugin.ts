@@ -66,6 +66,7 @@ interface Mutations {
   updateObjectFatherPolys: UpdateObjectFatherPoly[];
   updateObjectIds: UpdateObjectId[];
   deleteObjectIds: number[];
+  objectOrder: number[];
 }
 
 interface ExportRequest {
@@ -101,6 +102,7 @@ function applyMutations(root: any, mutations: Mutations): UpdateObjectId[] {
   applyUpdateObjectLabels(root, mutations.updateObjectLabels);
   applyUpdateObjectFatherPolys(root, mutations.updateObjectFatherPolys);
   applyDeleteObjects(root, mutations.deleteObjectIds);
+  applyObjectOrder(root, mutations.objectOrder);
   rebuildCounters(root);
   return appliedRenames;
 }
@@ -441,6 +443,32 @@ function applyUpdateObjectFatherPolys(root: any, updates: UpdateObjectFatherPoly
 }
 
 /**
+ * Reorder root.objects to match the frontend drag order. `order` lists
+ * effective/current object ids; objects not listed (e.g. missing after a
+ * rename edge case) keep their relative position and are appended last.
+ */
+function applyObjectOrder(root: any, order: number[]): void {
+  if (!order?.length) return;
+  const objects = root.objects || [];
+  const byId = new Map<number, any>();
+  for (const o of objects) byId.set(Number(o.id), o);
+
+  const ordered: any[] = [];
+  for (const rawId of order) {
+    const id = Number(rawId);
+    const obj = byId.get(id);
+    if (obj) {
+      ordered.push(obj);
+      byId.delete(id);
+    }
+  }
+  for (const obj of objects) {
+    if (byId.has(Number(obj.id))) ordered.push(obj);
+  }
+  root.objects = ordered;
+}
+
+/**
  * Rename objects (oldId → newId), keeping every id reference in sync:
  * objects[].id, areas[].object_ids, polyhedrons[].object_ids,
  * cross-object edges (father_object_id / child_object_ids), and the
@@ -670,20 +698,28 @@ function sendJson(res: ServerResponse, status: number, body: any): void {
   res.end(json);
 }
 
-// ---- File logger (logs/YYYY-MM-DD.log) ----
+// ---- File logger (logs/YYYY-MM-DD_HH-MM-SS.log) ----
 
 let logDir: string | null = null;
+let logFileName: string | null = null;
+
+function localTimestamp(d: Date): string {
+  const p = (n: number) => String(n).padStart(2, "0");
+  return (
+    `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}` +
+    `_${p(d.getHours())}-${p(d.getMinutes())}-${p(d.getSeconds())}`
+  );
+}
 
 function logToFile(scope: string, event: string, detail?: unknown): void {
-  if (!logDir) return;
+  if (!logDir || !logFileName) return;
   try {
     const now = new Date();
-    const dateTag = now.toISOString().slice(0, 10);
     const line =
       `${now.toISOString()} [${scope}] ${event}` +
       (detail !== undefined ? ` ${JSON.stringify(detail)}` : "") +
       "\n";
-    appendFileSync(join(logDir, `${dateTag}.log`), line);
+    appendFileSync(join(logDir, logFileName), line);
   } catch {
     /* logging must never break the request */
   }
@@ -694,8 +730,10 @@ function logToFile(scope: string, event: string, detail?: unknown): void {
 export function apiPlugin(): Plugin {
   const PROJECT_ROOT = join(import.meta.dirname, "..");
 
-  // Initialize the log directory on plugin setup: logs/YYYY-MM-DD.log
+  // Initialize the log directory on plugin setup. Each `bun run dev` restart
+  // gets its own timestamped file: logs/YYYY-MM-DD_HH-MM-SS.log
   logDir = join(PROJECT_ROOT, "logs");
+  logFileName = `${localTimestamp(new Date())}.log`;
   mkdirSync(logDir, { recursive: true });
   logToFile("server", "dev server starting");
 

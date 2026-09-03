@@ -9,6 +9,8 @@ interface Props {
   onSelect: (id: number) => void;
   onChangeId: (oldId: number, newId: number) => void;
   onChangeLabel: (id: number, label: string) => void;
+  /** Called with the full effective object-id order after a drag reorder */
+  onChangeOrder: (order: number[]) => void;
 }
 
 /**
@@ -23,9 +25,38 @@ export function ObjectsListPanel({
   onSelect,
   onChangeId,
   onChangeLabel,
+  onChangeOrder,
 }: Props) {
   const [collapsed, setCollapsed] = useState(false);
   const [filter, setFilter] = useState("");
+  const [dragId, setDragId] = useState<number | null>(null);
+  const [dragOverId, setDragOverId] = useState<number | null>(null);
+
+  const moveItem = useCallback(
+    (fromId: number, toId: number) => {
+      if (fromId === toId) return;
+      const fromIdx = objects.findIndex((o) => o.id === fromId);
+      const toIdx = objects.findIndex((o) => o.id === toId);
+      if (fromIdx < 0 || toIdx < 0) return;
+      const next = [...objects];
+      const [moved] = next.splice(fromIdx, 1);
+      // Insert before the target row (target shifts left when moving down).
+      const insertAt = fromIdx < toIdx ? toIdx - 1 : toIdx;
+      next.splice(insertAt, 0, moved);
+      onChangeOrder(next.map((o) => o.id));
+    },
+    [objects, onChangeOrder],
+  );
+
+  const handleDrop = useCallback(
+    (targetId: number) => {
+      if (dragId === null) return;
+      moveItem(dragId, targetId);
+      setDragId(null);
+      setDragOverId(null);
+    },
+    [dragId, moveItem],
+  );
 
   const visible = filter.trim()
     ? objects.filter(
@@ -131,9 +162,18 @@ export function ObjectsListPanel({
                 object={o}
                 existingIds={existingIds}
                 selected={selectedIds.has(o.id)}
+                dragging={dragId === o.id}
+                dragOver={dragOverId === o.id}
                 onSelect={onSelect}
                 onChangeId={onChangeId}
                 onChangeLabel={onChangeLabel}
+                onDragStartHandle={() => setDragId(o.id)}
+                onDragEndHandle={() => {
+                  setDragId(null);
+                  setDragOverId(null);
+                }}
+                onDragOverRow={() => setDragOverId(o.id)}
+                onDropRow={() => handleDrop(o.id)}
               />
             ))}
           </div>
@@ -147,16 +187,28 @@ function ObjectRow({
   object,
   existingIds,
   selected,
+  dragging,
+  dragOver,
   onSelect,
   onChangeId,
   onChangeLabel,
+  onDragStartHandle,
+  onDragEndHandle,
+  onDragOverRow,
+  onDropRow,
 }: {
   object: SceneObject;
   existingIds: number[];
   selected: boolean;
+  dragging: boolean;
+  dragOver: boolean;
   onSelect: (id: number) => void;
   onChangeId: (oldId: number, newId: number) => void;
   onChangeLabel: (id: number, label: string) => void;
+  onDragStartHandle: () => void;
+  onDragEndHandle: () => void;
+  onDragOverRow: () => void;
+  onDropRow: () => void;
 }) {
   const [localId, setLocalId] = useState(String(object.id));
   const [localLabel, setLocalLabel] = useState(object.label);
@@ -217,7 +269,17 @@ function ObjectRow({
   return (
     <div
       onClick={(e) => {
-        if ((e.target as HTMLElement).tagName !== "INPUT") onSelect(object.id);
+        const el = e.target as HTMLElement;
+        if (el.tagName === "INPUT" || el.closest("[data-drag-handle]")) return;
+        onSelect(object.id);
+      }}
+      onDragOver={(e) => {
+        e.preventDefault();
+        onDragOverRow();
+      }}
+      onDrop={(e) => {
+        e.preventDefault();
+        onDropRow();
       }}
       style={{
         display: "flex",
@@ -225,8 +287,18 @@ function ObjectRow({
         gap: 6,
         padding: "3px 4px",
         borderRadius: 4,
-        background: selected ? "rgba(52,152,219,0.18)" : "transparent",
-        border: selected ? "1px solid rgba(52,152,219,0.4)" : "1px solid transparent",
+        background: dragging
+          ? "rgba(52,152,219,0.24)"
+          : dragOver
+            ? "rgba(52,152,219,0.12)"
+            : selected
+              ? "rgba(52,152,219,0.18)"
+              : "transparent",
+        border: dragOver
+          ? "1px solid rgba(52,152,219,0.6)"
+          : selected
+            ? "1px solid rgba(52,152,219,0.4)"
+            : "1px solid transparent",
         marginBottom: 2,
         cursor: "pointer",
       }}
@@ -262,6 +334,27 @@ function ObjectRow({
         onKeyDown={(e) => handleKeyDown(e, applyLabel)}
         style={{ ...inputStyle, flex: 1, minWidth: 90 }}
       />
+      <span
+        data-drag-handle
+        draggable
+        onDragStart={(e) => {
+          e.dataTransfer.effectAllowed = "move";
+          e.dataTransfer.setData("text/plain", String(object.id));
+          onDragStartHandle();
+        }}
+        onDragEnd={onDragEndHandle}
+        title="Drag to reorder"
+        style={{
+          cursor: "grab",
+          color: dragging ? "#fff" : "#666",
+          fontSize: 12,
+          flexShrink: 0,
+          padding: "0 2px",
+          userSelect: "none",
+        }}
+      >
+        ⠿
+      </span>
     </div>
   );
 }

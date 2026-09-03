@@ -48,6 +48,7 @@ import {
   addUpdateObjectId,
   addDeleteObject,
   addCreatePoly,
+  addUpdateObjectOrder,
 } from "./lib/mutations";
 import type {
   SceneData,
@@ -192,19 +193,18 @@ function effectiveObjects(
   allObjects: SceneObject[],
   m: Mutations,
 ): SceneObject[] {
-  // Apply id renames first (same order as the backend mutation engine)
+  // Apply id renames as a flat injective mapping originalId → finalId.
+  // addUpdateObjectId already resolves effective ids back to the original
+  // id, so each entry is independent and must NOT be chain-followed here
+  // (chain-following collapses swaps/cycles into duplicate ids).
   const idMap = new Map<number, number>();
   for (const r of m.updateObjectIds) {
-    // Follow chains: a→b recorded, then b→c makes a→c
-    for (const [from, to] of idMap) {
-      if (to === r.oldId) idMap.set(from, r.newId);
-    }
     idMap.set(r.oldId, r.newId);
   }
   const deleted = new Set(m.deleteObjectIds);
   const labelMap = new Map(m.updateObjectLabels.map((u) => [u.id, u.label]));
   const fatherPolyMap = new Map(m.updateObjectFatherPolys.map((u) => [u.objectId, u.fatherPolyId]));
-  return allObjects
+  const result = allObjects
     .filter((o) => {
       const id = idMap.get(o.id) ?? o.id;
       return !deleted.has(id);
@@ -225,6 +225,27 @@ function effectiveObjects(
       }
       return obj;
     });
+
+  // Apply the user-defined object order (effective/current ids) when set.
+  const order = m.objectOrder ?? [];
+  if (order.length > 0) {
+    const byId = new Map(result.map((o) => [o.id, o]));
+    const ordered: SceneObject[] = [];
+    for (const id of order) {
+      const obj = byId.get(id);
+      if (obj) {
+        ordered.push(obj);
+        byId.delete(id);
+      }
+    }
+    // Preserve any objects not present in objectOrder (e.g. after rename
+    // edge cases) in their current relative order.
+    for (const obj of result) {
+      if (byId.has(obj.id)) ordered.push(obj);
+    }
+    return ordered;
+  }
+  return result;
 }
 
 // ---- click handler (inside Canvas) ----
@@ -1296,6 +1317,9 @@ export function App() {
           }}
           onChangeLabel={(id, label) => {
             commitEdit((current) => addUpdateObjectLabel(current, id, label));
+          }}
+          onChangeOrder={(order) => {
+            commitEdit((current) => addUpdateObjectOrder(current, order));
           }}
         />
       )}

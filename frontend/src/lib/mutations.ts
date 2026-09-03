@@ -11,6 +11,7 @@ export function emptyMutations(): Mutations {
     updateObjectFatherPolys: [],
     updateObjectIds: [],
     deleteObjectIds: [],
+    objectOrder: [],
   };
 }
 
@@ -24,7 +25,8 @@ export function mutationCount(m: Mutations): number {
     m.updateObjectLabels.length +
     m.updateObjectFatherPolys.length +
     m.updateObjectIds.length +
-    m.deleteObjectIds.length
+    m.deleteObjectIds.length +
+    (m.objectOrder?.length ?? 0)
   );
 }
 
@@ -121,6 +123,17 @@ export function addDeleteObject(m: Mutations, id: number): Mutations {
   if (m.deleteObjectIds.includes(id)) return m;
   const n = shallowCopy(m);
   n.deleteObjectIds = [...m.deleteObjectIds, id];
+  n.objectOrder = (n.objectOrder ?? []).filter((oid) => oid !== id);
+  return n;
+}
+
+/** Set the desired export order of object ids (effective/current ids). */
+export function addUpdateObjectOrder(
+  m: Mutations,
+  order: number[],
+): Mutations {
+  const n = shallowCopy(m);
+  n.objectOrder = [...order];
   return n;
 }
 
@@ -144,6 +157,9 @@ export function addUpdateObjectId(
     u.objectId === oldId ? { ...u, objectId: newId } : u,
   );
   n.deleteObjectIds = n.deleteObjectIds.map((id) => (id === oldId ? newId : id));
+  n.objectOrder = (n.objectOrder ?? []).map((id) =>
+    id === oldId ? newId : id,
+  );
 
   // Merge with an existing rename chain: a→oldId becomes a→newId
   const chainedIdx = n.updateObjectIds.findIndex((u) => u.newId === oldId);
@@ -175,5 +191,6 @@ function shallowCopy(m: Mutations): Mutations {
     updateObjectFatherPolys: m.updateObjectFatherPolys.map((x) => ({ ...x })),
     updateObjectIds: m.updateObjectIds.map((x) => ({ ...x })),
     deleteObjectIds: [...m.deleteObjectIds],
+    objectOrder: [...(m.objectOrder ?? [])],
   };
 }
