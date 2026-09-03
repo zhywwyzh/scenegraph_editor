@@ -77,6 +77,10 @@ interface Layers {
 
 type LayerKey = keyof Layers;
 
+// Cap scene-level point clouds to avoid freezing the UI when parsing/rendering
+// very large files (e.g. elec.pcd has 6,559,828 points).
+const SCENE_PCD_MAX_POINTS = 2_000_000;
+
 const EDIT_ONLY_LAYERS: Layers = {
   areas: false,
   areaEdges: false,
@@ -642,6 +646,8 @@ export function App() {
   const [pcdLayers, setPcdLayers] = useState<{ key: string; positions: Float32Array; colorHex: string }[]>([]);
   const [pcdLoading, setPcdLoading] = useState(false);
   const [scenePcds, setScenePcds] = useState<string[]>([]);
+  // Cache parsed scene-level clouds so export reload doesn't re-parse huge files.
+  const scenePcdCacheRef = useRef(new Map<string, { positions: Float32Array; colorHex: string }>());
 
   // Display controls
   const [nodeSize, setNodeSize] = useLocalStorageState("disp_nodeSize", 0.12);
@@ -755,10 +761,17 @@ export function App() {
     } else if (selectedPcd.startsWith("scene:")) {
       // Load scene-level PCD
       const name = selectedPcd.slice(6);
+      const cached = scenePcdCacheRef.current.get(name);
+      if (cached) {
+        setPcdLayers([{ key: "scene", positions: cached.positions, colorHex: cached.colorHex }]);
+        return;
+      }
       setPcdLoading(true);
-      loadPcd(`/api/pcd?source=scene&name=${encodeURIComponent(name)}`)
+      loadPcd(`/api/pcd?source=scene&name=${encodeURIComponent(name)}`, SCENE_PCD_MAX_POINTS)
         .then((r) => {
-          setPcdLayers([{ key: "scene", positions: r.positions, colorHex: "#aaccff" }]);
+          const layer = { key: "scene", positions: r.positions, colorHex: "#aaccff" };
+          scenePcdCacheRef.current.set(name, { positions: r.positions, colorHex: "#aaccff" });
+          setPcdLayers([layer]);
           setPcdLoading(false);
         })
         .catch((e) => {

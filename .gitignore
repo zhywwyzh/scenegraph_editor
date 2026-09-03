@@ -2,8 +2,11 @@
 
 # Scene graph data
 scene_graph_saved/*
+!scene_graph_saved/.gitkeep
 scene_graph_exported/*
-pcd/
+!scene_graph_exported/.gitkeep
+pcd/*
+!pcd/.gitkeep
 
 # Node / Bun
 node_modules/

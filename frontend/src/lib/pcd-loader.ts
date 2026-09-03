@@ -21,31 +21,35 @@ export interface PcdResult {
   meta: PcdMeta;
 }
 
-export async function loadPcd(url: string): Promise<PcdResult> {
+export async function loadPcd(url: string, maxPoints: number = Infinity): Promise<PcdResult> {
   const resp = await fetch(url, { cache: "no-store" });
   if (!resp.ok) throw new Error(`PCD load failed: ${resp.status}`);
   const buf = await resp.arrayBuffer();
-  return parsePcdBuffer(buf);
+  return parsePcdBuffer(buf, maxPoints);
 }
 
-export function parsePcdBuffer(buf: ArrayBuffer): PcdResult {
+export function parsePcdBuffer(buf: ArrayBuffer, maxPoints: number = Infinity): PcdResult {
   const view = new DataView(buf);
   const headerEnd = findHeaderEnd(view);
   const header = new TextDecoder().decode(new Uint8Array(buf, 0, headerEnd));
   const meta = parseHeader(header);
   const dataOffset = headerEnd + 1; // skip \n after "DATA binary"
 
-  const positions = new Float32Array(meta.points * 3);
+  // Downsample very large clouds to keep parsing + rendering responsive.
+  const stride = maxPoints < meta.points ? Math.ceil(meta.points / maxPoints) : 1;
+  const sampled = Math.ceil(meta.points / stride);
+
+  const positions = new Float32Array(sampled * 3);
   const le = isLittleEndian(view, dataOffset, meta.points, meta.stride, meta.xOff);
 
-  for (let i = 0; i < meta.points; i++) {
+  for (let i = 0, o = 0; i < meta.points; i += stride, o++) {
     const base = dataOffset + i * meta.stride;
-    positions[i * 3] = view.getFloat32(base + meta.xOff, le);
-    positions[i * 3 + 1] = view.getFloat32(base + meta.yOff, le);
-    positions[i * 3 + 2] = view.getFloat32(base + meta.zOff, le);
+    positions[o * 3] = view.getFloat32(base + meta.xOff, le);
+    positions[o * 3 + 1] = view.getFloat32(base + meta.yOff, le);
+    positions[o * 3 + 2] = view.getFloat32(base + meta.zOff, le);
   }
 
-  return { positions, meta };
+  return { positions, meta: { ...meta, points: sampled } };
 }
 
 function findHeaderEnd(view: DataView): number {
