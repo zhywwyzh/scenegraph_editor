@@ -3,21 +3,57 @@ import type { SceneObject } from "../lib/types";
 
 interface Props {
   object: SceneObject;
+  /** Current ids of all (effective) objects, used to block duplicate ids */
+  existingIds: number[];
+  onChangeId: (oldId: number, newId: number) => void;
   onChangeLabel: (id: number, label: string) => void;
   onDelete: (id: number) => void;
 }
 
 /**
  * Property panel shown when exactly one scene object is selected in edit mode.
- * Allows editing the object's label.
+ * Allows editing the object's id and label.
  */
-export function ObjectPropertyPanel({ object, onChangeLabel, onDelete }: Props) {
+export function ObjectPropertyPanel({
+  object,
+  existingIds,
+  onChangeId,
+  onChangeLabel,
+  onDelete,
+}: Props) {
   const [localLabel, setLocalLabel] = useState(object.label);
+  const [localId, setLocalId] = useState(String(object.id));
 
   // Reset when selected object changes
   useEffect(() => {
     setLocalLabel(object.label);
+    setLocalId(String(object.id));
   }, [object.id, object.label]);
+
+  // id is a uint16 in the flight instruction contract (target_obj_id)
+  const parsedId = Number(localId);
+  const idValid =
+    Number.isInteger(parsedId) &&
+    parsedId >= 0 &&
+    parsedId <= 65535 &&
+    parsedId !== object.id &&
+    !existingIds.includes(parsedId);
+
+  const handleApplyId = useCallback(() => {
+    if (idValid) {
+      onChangeId(object.id, parsedId);
+    }
+  }, [idValid, object.id, parsedId, onChangeId]);
+
+  const handleIdKeyDown = useCallback(
+    (e: React.KeyboardEvent<HTMLInputElement>) => {
+      if (e.key === "Enter" && idValid) {
+        handleApplyId();
+        (e.target as HTMLInputElement).blur();
+      }
+    },
+    [handleApplyId, idValid],
+  );
 
   const handleApply = useCallback(() => {
     if (localLabel.trim() !== object.label) {
@@ -69,7 +105,6 @@ export function ObjectPropertyPanel({ object, onChangeLabel, onDelete }: Props) 
       </div>
 
       {/* Read-only metadata */}
-      <Row label="ID" value={String(object.id)} />
       <Row label="Area ID" value={object.areaId >= 0 ? String(object.areaId) : "—"} />
       <Row
         label="Father Poly"
@@ -79,6 +114,52 @@ export function ObjectPropertyPanel({ object, onChangeLabel, onDelete }: Props) 
         label="Position"
         value={object.position.map((v) => v.toFixed(2)).join(", ")}
       />
+
+      {/* ID editing */}
+      <div style={{ fontSize: 10, color: "#888", margin: "6px 0 4px" }}>
+        ID {localId !== String(object.id) && (
+          <span style={{ color: idValid ? "#2ecc71" : "#e55" }}>
+            {idValid ? "✓" : "invalid (duplicate / out of 0–65535)"}
+          </span>
+        )}
+      </div>
+      <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
+        <input
+          type="number"
+          value={localId}
+          onChange={(e) => setLocalId(e.target.value)}
+          onKeyDown={handleIdKeyDown}
+          style={{
+            flex: 1,
+            background: "#1a1a2e",
+            color: "#eee",
+            border: "1px solid #3498db",
+            borderRadius: 4,
+            padding: "3px 6px",
+            fontFamily: "monospace",
+            fontSize: 12,
+          }}
+        />
+        <button
+          type="button"
+          onClick={handleApplyId}
+          disabled={!idValid}
+          style={{
+            background: "rgba(52,152,219,0.3)",
+            border: "1px solid rgba(52,152,219,0.5)",
+            borderRadius: 4,
+            color: "#3498db",
+            padding: "3px 8px",
+            cursor: idValid ? "pointer" : "not-allowed",
+            opacity: idValid ? 1 : 0.4,
+            fontFamily: "monospace",
+            fontSize: 11,
+            whiteSpace: "nowrap",
+          }}
+        >
+          Apply
+        </button>
+      </div>
 
       <div style={{ margin: "8px 0 6px", borderTop: "1px solid #333" }} />
 

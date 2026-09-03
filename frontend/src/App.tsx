@@ -16,6 +16,7 @@ import { ExportDiffPanel } from "./components/ExportDiffPanel";
 import { NodePropertyPanel } from "./components/NodePropertyPanel";
 import { ObjectsLayer } from "./components/ObjectsLayer";
 import { ObjectPropertyPanel } from "./components/ObjectPropertyPanel";
+import { ObjectsListPanel } from "./components/ObjectsListPanel";
 import { AddNodePanel } from "./components/AddNodePanel";
 import { PointCloudLayer, type PcdColorScheme, SCHEME_LABELS } from "./components/PointCloudLayer";
 import { loadSceneGraph } from "./lib/scene-loader";
@@ -43,6 +44,7 @@ import {
   addMovePoly,
   addUpdateObjectLabel,
   addUpdateObjectFatherPoly,
+  addUpdateObjectId,
   addDeleteObject,
   addCreatePoly,
 } from "./lib/mutations";
@@ -189,18 +191,34 @@ function effectiveObjects(
   allObjects: SceneObject[],
   m: Mutations,
 ): SceneObject[] {
+  // Apply id renames first (same order as the backend mutation engine)
+  const idMap = new Map<number, number>();
+  for (const r of m.updateObjectIds) {
+    // Follow chains: a→b recorded, then b→c makes a→c
+    for (const [from, to] of idMap) {
+      if (to === r.oldId) idMap.set(from, r.newId);
+    }
+    idMap.set(r.oldId, r.newId);
+  }
   const deleted = new Set(m.deleteObjectIds);
   const labelMap = new Map(m.updateObjectLabels.map((u) => [u.id, u.label]));
   const fatherPolyMap = new Map(m.updateObjectFatherPolys.map((u) => [u.objectId, u.fatherPolyId]));
   return allObjects
-    .filter((o) => !deleted.has(o.id))
+    .filter((o) => {
+      const id = idMap.get(o.id) ?? o.id;
+      return !deleted.has(id);
+    })
     .map((o) => {
       let obj = o;
-      const newLabel = labelMap.get(o.id);
+      const newId = idMap.get(o.id);
+      if (newId !== undefined) {
+        obj = { ...obj, id: newId };
+      }
+      const newLabel = labelMap.get(obj.id);
       if (newLabel !== undefined) {
         obj = { ...obj, label: newLabel };
       }
-      const newFather = fatherPolyMap.get(o.id);
+      const newFather = fatherPolyMap.get(obj.id);
       if (newFather !== undefined) {
         obj = { ...obj, fatherPolyId: newFather };
       }
@@ -1213,6 +1231,22 @@ export function App() {
         </div>
       )}
 
+      {editMode === "edit" && (
+        <ObjectsListPanel
+          objects={effectiveTObjects}
+          existingIds={effectiveTObjects.map((o) => o.id)}
+          selectedIds={selectedObjectIds}
+          onSelect={(id) => setSelectedObjectIds(new Set([id]))}
+          onChangeId={(oldId, newId) => {
+            commitEdit((current) => addUpdateObjectId(current, oldId, newId));
+            setSelectedObjectIds(new Set([newId]));
+          }}
+          onChangeLabel={(id, label) => {
+            commitEdit((current) => addUpdateObjectLabel(current, id, label));
+          }}
+        />
+      )}
+
       {editMode === "edit" && selectedNodeIds.size === 1 && (
         <NodePropertyPanel
           node={effectiveTNodes.find((n) => selectedNodeIds.has(n.id))!}
@@ -1222,9 +1256,15 @@ export function App() {
         />
       )}
 
-      {editMode === "edit" && selectedObjectIds.size === 1 && (
+      {editMode === "edit" && selectedObjectIds.size === 1 &&
+        effectiveTObjects.some((o) => selectedObjectIds.has(o.id)) && (
         <ObjectPropertyPanel
           object={effectiveTObjects.find((o) => selectedObjectIds.has(o.id))!}
+          existingIds={effectiveTObjects.map((o) => o.id)}
+          onChangeId={(oldId, newId) => {
+            commitEdit((current) => addUpdateObjectId(current, oldId, newId));
+            setSelectedObjectIds(new Set([newId]));
+          }}
           onChangeLabel={(id, label) => {
             commitEdit((current) => addUpdateObjectLabel(current, id, label));
           }}

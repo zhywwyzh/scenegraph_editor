@@ -1,6 +1,8 @@
+.agents/
+
 # Scene graph data
-scene_graph_saved/
-scene_graph_exported/
+scene_graph_saved/*
+scene_graph_exported/*
 pcd/
 
 # Node / Bun

@@ -9,6 +9,7 @@ export function emptyMutations(): Mutations {
     createPoly: [],
     updateObjectLabels: [],
     updateObjectFatherPolys: [],
+    updateObjectIds: [],
     deleteObjectIds: [],
   };
 }
@@ -118,7 +119,47 @@ export function addUpdateObjectFatherPoly(
 export function addDeleteObject(m: Mutations, id: number): Mutations {
   if (m.deleteObjectIds.includes(id)) return m;
   const n = shallowCopy(m);
-  n.deleteObjectIds = [...n.deleteObjectIds, id];
+  n.deleteObjectIds = [...m.deleteObjectIds, id];
+  return n;
+}
+
+/**
+ * Rename an object (oldId → newId). Because the backend applies
+ * updateObjectIds before every other object mutation, any pending
+ * mutation still referencing oldId is rewritten to newId here.
+ */
+export function addUpdateObjectId(
+  m: Mutations,
+  oldId: number,
+  newId: number,
+): Mutations {
+  const n = shallowCopy(m);
+
+  // Rewrite pending object mutations that still reference oldId
+  n.updateObjectLabels = n.updateObjectLabels.map((u) =>
+    u.id === oldId ? { ...u, id: newId } : u,
+  );
+  n.updateObjectFatherPolys = n.updateObjectFatherPolys.map((u) =>
+    u.objectId === oldId ? { ...u, objectId: newId } : u,
+  );
+  n.deleteObjectIds = n.deleteObjectIds.map((id) => (id === oldId ? newId : id));
+
+  // Merge with an existing rename chain: a→oldId becomes a→newId
+  const chainedIdx = n.updateObjectIds.findIndex((u) => u.newId === oldId);
+  if (chainedIdx >= 0) {
+    n.updateObjectIds[chainedIdx] = {
+      ...n.updateObjectIds[chainedIdx],
+      newId,
+    };
+    return n;
+  }
+
+  const idx = n.updateObjectIds.findIndex((u) => u.oldId === oldId);
+  if (idx >= 0) {
+    n.updateObjectIds[idx] = { oldId, newId };
+  } else {
+    n.updateObjectIds = [...n.updateObjectIds, { oldId, newId }];
+  }
   return n;
 }
 
@@ -131,6 +172,7 @@ function shallowCopy(m: Mutations): Mutations {
     createPoly: m.createPoly.map((x) => ({ areaId: x.areaId, center: [...x.center] as [number, number, number], size: x.size })),
     updateObjectLabels: m.updateObjectLabels.map((x) => ({ ...x })),
     updateObjectFatherPolys: m.updateObjectFatherPolys.map((x) => ({ ...x })),
+    updateObjectIds: m.updateObjectIds.map((x) => ({ ...x })),
     deleteObjectIds: [...m.deleteObjectIds],
   };
 }

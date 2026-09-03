@@ -9,7 +9,15 @@
  */
 import type { Plugin, ViteDevServer } from "vite";
 import type { IncomingMessage, ServerResponse } from "node:http";
-import { readFileSync, writeFileSync, mkdirSync, readdirSync, statSync } from "node:fs";
+import {
+  readFileSync,
+  writeFileSync,
+  mkdirSync,
+  readdirSync,
+  statSync,
+  copyFileSync,
+  renameSync,
+} from "node:fs";
 import { readdir, copyFile, mkdir } from "node:fs/promises";
 import { join, dirname } from "node:path";
 
@@ -41,6 +49,11 @@ interface UpdateObjectFatherPoly {
   fatherPolyId: number;
 }
 
+interface UpdateObjectId {
+  oldId: number;
+  newId: number;
+}
+
 interface Mutations {
   deletePolyIds: number[];
   movePoly: MovePoly[];
@@ -49,6 +62,7 @@ interface Mutations {
   createPoly: CreatePoly[];
   updateObjectLabels: UpdateObjectLabel[];
   updateObjectFatherPolys: UpdateObjectFatherPoly[];
+  updateObjectIds: UpdateObjectId[];
   deleteObjectIds: number[];
 }
 
@@ -73,16 +87,20 @@ function writeJson(path: string, data: any): void {
 
 // ---- Mutation engine ----
 
-function applyMutations(root: any, mutations: Mutations): void {
+function applyMutations(root: any, mutations: Mutations): UpdateObjectId[] {
   applyDeletePolys(root, mutations.deletePolyIds);
   applyMovePolys(root, mutations.movePoly);
   applyRemoveEdges(root, mutations.removeEdges);
   applyAddEdges(root, mutations.addEdges);
   applyCreatePolys(root, mutations.createPoly);
+  // Object id renames run first — the frontend rewrites all other object
+  // mutations to reference the new id, so they must run after the rename.
+  const appliedRenames = applyUpdateObjectIds(root, mutations.updateObjectIds);
   applyUpdateObjectLabels(root, mutations.updateObjectLabels);
   applyUpdateObjectFatherPolys(root, mutations.updateObjectFatherPolys);
   applyDeleteObjects(root, mutations.deleteObjectIds);
   rebuildCounters(root);
+  return appliedRenames;
 }
 
 function applyDeletePolys(root: any, ids: number[]): void {
@@ -420,6 +438,89 @@ function applyUpdateObjectFatherPolys(root: any, updates: UpdateObjectFatherPoly
   }
 }
 
+/**
+ * Rename objects (oldId → newId), keeping every id reference in sync:
+ * objects[].id, areas[].object_ids, polyhedrons[].object_ids,
+ * cross-object edges (father_object_id / child_object_ids), and the
+ * files.{cloud,obb_axis,obb_corners} path prefixes (object_<id>_* →
+ * object_<newId>_*). The actual PCD files are renamed on disk by
+ * renameObjectFiles() after copyObjectsDir() — saved/ stays untouched.
+ * Skips renames with a duplicate target id, a missing source object,
+ * or a new id outside the uint16 target_obj_id contract (0–65535).
+ * Returns the list of renames actually applied (in application order).
+ */
+function applyUpdateObjectIds(root: any, renames: UpdateObjectId[]): UpdateObjectId[] {
+  const applied: UpdateObjectId[] = [];
+  if (renames.length === 0) return applied;
+
+  for (const r of renames) {
+    const oldId = Number(r.oldId);
+    const newId = Number(r.newId);
+    if (
+      !Number.isInteger(oldId) ||
+      !Number.isInteger(newId) ||
+      oldId === newId ||
+      newId < 0 ||
+      newId > 65535
+    ) {
+      continue;
+    }
+
+    const objects = root.objects || [];
+    const target = objects.find((o: any) => Number(o.id) === oldId);
+    if (!target) continue;
+
+    // Skip if another object already uses the new id
+    const conflict = objects.some(
+      (o: any) => o !== target && Number(o.id) === newId,
+    );
+    if (conflict) continue;
+
+    target.id = newId;
+
+    // Rewrite files.* path basenames: object_<oldId>_<kind>.pcd → object_<newId>_<kind>.pcd
+    const files = target.files || {};
+    for (const key of ["cloud", "obb_axis", "obb_corners"]) {
+      const p = files[key];
+      if (typeof p !== "string" || !p.includes("/")) continue;
+      const slash = p.lastIndexOf("/");
+      files[key] =
+        p.slice(0, slash + 1) +
+        p
+          .slice(slash + 1)
+          .replace(
+            new RegExp(`^object_${oldId}_`),
+            `object_${newId}_`,
+          );
+    }
+
+    for (const area of root.areas || []) {
+      area.object_ids = (area.object_ids || []).map((oid: any) =>
+        Number(oid) === oldId ? newId : Number(oid),
+      );
+    }
+    for (const poly of root.polyhedrons || []) {
+      poly.object_ids = (poly.object_ids || []).map((oid: any) =>
+        Number(oid) === oldId ? newId : Number(oid),
+      );
+    }
+    for (const obj of objects) {
+      const edge = obj.edge || {};
+      if (Number(edge.father_object_id) === oldId) {
+        edge.father_object_id = newId;
+        if (!obj.edge) obj.edge = edge;
+      }
+      edge.child_object_ids = (edge.child_object_ids || []).map((cid: any) =>
+        Number(cid) === oldId ? newId : Number(cid),
+      );
+      if (obj.edge) obj.edge = edge;
+    }
+
+    applied.push({ oldId, newId });
+  }
+  return applied;
+}
+
 function rebuildCounters(root: any): void {
   const counters = root.counters || {};
   counters.area_count = (root.areas || []).length;
@@ -433,6 +534,12 @@ function rebuildCounters(root: any): void {
 
 // ---- file copy (mirror objects/ from saved to exported) ----
 
+/**
+ * Copy objects/ PCD files from saved/ into exported/, but never overwrite
+ * an existing file in exported/ — earlier exports may have renamed files
+ * there (object_<oldId>_*.pcd → object_<newId>_*.pcd) and overwriting
+ * from saved/ would clobber them on subsequent exports.
+ */
 async function copyObjectsDir(savedDir: string, exportedDir: string): Promise<void> {
   const src = join(savedDir, "objects");
   const dst = join(exportedDir, "objects");
@@ -440,10 +547,58 @@ async function copyObjectsDir(savedDir: string, exportedDir: string): Promise<vo
     const entries = await readdir(src);
     await mkdir(dst, { recursive: true });
     for (const f of entries) {
-      await copyFile(join(src, f), join(dst, f));
+      const dstFile = join(dst, f);
+      try {
+        statSync(dstFile);
+      } catch {
+        await copyFile(join(src, f), dstFile);
+      }
     }
   } catch {
     // no objects dir — ok
+  }
+}
+
+/**
+ * Rename object PCD files in exported/objects to match applied id renames.
+ * Runs AFTER copyObjectsDir so the original files are present. If a source
+ * file is missing in exported/ (e.g. chained renames from a previous
+ * export already moved it), it is re-pulled from saved/objects/.
+ * saved/ is never modified. Objects without a file for a given kind
+ * (e.g. empty cloud) are skipped silently.
+ */
+function renameObjectFiles(
+  savedDir: string,
+  exportedDir: string,
+  renames: UpdateObjectId[],
+): void {
+  if (renames.length === 0) return;
+  const savedObjects = join(savedDir, "objects");
+  const exportedObjects = join(exportedDir, "objects");
+  mkdirSync(exportedObjects, { recursive: true });
+
+  for (const r of renames) {
+    for (const kind of ["cloud", "obb_axis", "obb_corners"]) {
+      const oldName = `object_${r.oldId}_${kind}.pcd`;
+      const newName = `object_${r.newId}_${kind}.pcd`;
+      const oldPath = join(exportedObjects, oldName);
+
+      let haveOld = true;
+      try {
+        statSync(oldPath);
+      } catch {
+        // Not in exported/ yet (or renamed away in an earlier export) —
+        // pull the original from saved/.
+        try {
+          copyFileSync(join(savedObjects, oldName), oldPath);
+        } catch {
+          haveOld = false; // object has no file of this kind
+        }
+      }
+      if (haveOld) {
+        renameSync(oldPath, join(exportedObjects, newName));
+      }
+    }
   }
 }
 
@@ -532,7 +687,7 @@ export function apiPlugin(): Plugin {
             }
             const root = readJson(sourcePath);
 
-            applyMutations(root, payload.mutations);
+            const appliedRenames = applyMutations(root, payload.mutations);
 
             writeJson(join(exportedDir, "scene_graph.json"), root);
 
@@ -555,6 +710,7 @@ export function apiPlugin(): Plugin {
             writeJson(join(exportedDir, "manifest.json"), manifest);
 
             await copyObjectsDir(savedDir, exportedDir);
+            renameObjectFiles(savedDir, exportedDir, appliedRenames);
 
             sendJson(res, 200, { success: true });
           } catch (err: any) {
@@ -681,7 +837,15 @@ export function apiPlugin(): Plugin {
                 sendJson(res, 400, { success: false, error: "Missing/invalid snapshot or path" });
                 return;
               }
-              filePath = join(PROJECT_ROOT, "scene_graph_saved", snapshot, relPath);
+              // Prefer exported/ (may contain renamed object files),
+              // fall back to saved/ — same order as /api/scene-graph.
+              const exportedFile = join(PROJECT_ROOT, "scene_graph_exported", snapshot, relPath);
+              try {
+                statSync(exportedFile);
+                filePath = exportedFile;
+              } catch {
+                filePath = join(PROJECT_ROOT, "scene_graph_saved", snapshot, relPath);
+              }
             }
             const data = readFileSync(filePath);
             res.writeHead(200, {

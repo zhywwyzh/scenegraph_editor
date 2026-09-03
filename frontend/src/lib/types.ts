@@ -108,6 +108,11 @@ export interface UpdateObjectFatherPoly {
   fatherPolyId: number;
 }
 
+export interface UpdateObjectId {
+  oldId: number;
+  newId: number;
+}
+
 export interface Mutations {
   deletePolyIds: number[];
   movePoly: MovePoly[];
@@ -116,6 +121,7 @@ export interface Mutations {
   createPoly: CreatePoly[];
   updateObjectLabels: UpdateObjectLabel[];
   updateObjectFatherPolys: UpdateObjectFatherPoly[];
+  updateObjectIds: UpdateObjectId[];
   deleteObjectIds: number[];
 }
 
