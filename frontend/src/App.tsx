@@ -21,6 +21,7 @@ import { AddNodePanel } from "./components/AddNodePanel";
 import { PointCloudLayer, type PcdColorScheme, SCHEME_LABELS } from "./components/PointCloudLayer";
 import { loadSceneGraph } from "./lib/scene-loader";
 import { loadPcd } from "./lib/pcd-loader";
+import { logEvent } from "./lib/logger";
 import { pickTarget } from "./lib/picking";
 import type { PickTarget, PickKind } from "./lib/picking";
 import {
@@ -653,6 +654,12 @@ export function App() {
 
   const dirty = mutationCount(mutations) > 0;
 
+  // Keep a ref to the latest mutations so handleExport always sees the
+  // freshest state — clicking Export blurs any focused inline input, whose
+  // commit may not be visible to the click handler's closure yet.
+  const mutationsRef = useRef(mutations);
+  mutationsRef.current = mutations;
+
   const commitEdit = useCallback(
     (update: (current: Mutations) => Mutations) => {
       setEditHistory((history) =>
@@ -898,8 +905,10 @@ export function App() {
   const handleUndo = useCallback(() => {
     if (editHistory.past.length === 0) {
       setConnectionNotice({ kind: "info", message: "Nothing to undo" });
+      logEvent("undo ignored (empty past)");
       return;
     }
+    logEvent("undo", { depth: editHistory.past.length });
     setEditHistory((history) => undoHistory(history));
     setSelectedNodeIds(new Set());
     setSelectedEdgeKey(null);
@@ -910,8 +919,10 @@ export function App() {
   const handleRedo = useCallback(() => {
     if (editHistory.future.length === 0) {
       setConnectionNotice({ kind: "info", message: "Nothing to redo" });
+      logEvent("redo ignored (empty future)");
       return;
     }
+    logEvent("redo", { depth: editHistory.future.length });
     setEditHistory((history) => redoHistory(history));
     setSelectedNodeIds(new Set());
     setSelectedEdgeKey(null);
@@ -923,11 +934,29 @@ export function App() {
 
   useEffect(() => {
     const handler = (e: KeyboardEvent) => {
+      // Undo/redo shortcuts must pass through even when an input is focused,
+      // otherwise the browser's native per-input text undo swallows them and
+      // the global edit history becomes unreachable. Blurring first commits
+      // (or reverts) any pending inline edit; commitEdit/handleUndo both use
+      // functional setState so the committed entry is then undone correctly.
       if (
         e.target instanceof HTMLInputElement ||
         e.target instanceof HTMLTextAreaElement
-      )
+      ) {
+        if (editMode === "edit" && isUndoShortcut(e)) {
+          e.preventDefault();
+          (e.target as HTMLElement).blur();
+          if (!e.repeat) handleUndo();
+          return;
+        }
+        if (editMode === "edit" && isRedoShortcut(e)) {
+          e.preventDefault();
+          (e.target as HTMLElement).blur();
+          if (!e.repeat) handleRedo();
+          return;
+        }
         return;
+      }
 
       if (e.key === "Escape") {
         handleDeselectAll();
@@ -1064,19 +1093,42 @@ export function App() {
   // ---- export ----
 
   const handleExport = useCallback(async () => {
-    if (!dirty || exporting || !snapshot) return;
+    // Read from ref: a blur-committed inline edit may be newer than the
+    // `mutations` value captured in this callback's closure.
+    const currentMutations = mutationsRef.current;
+    if (mutationCount(currentMutations) === 0 || exporting || !snapshot) {
+      logEvent("export skipped", { dirty: mutationCount(currentMutations) > 0, exporting, snapshot: !!snapshot });
+      return;
+    }
     setExporting(true);
+    logEvent("export start", {
+      snapshot,
+      base,
+      counts: {
+        deletePolyIds: currentMutations.deletePolyIds.length,
+        movePoly: currentMutations.movePoly.length,
+        removeEdges: currentMutations.removeEdges.length,
+        addEdges: currentMutations.addEdges.length,
+        createPoly: currentMutations.createPoly.length,
+        updateObjectLabels: currentMutations.updateObjectLabels.length,
+        updateObjectFatherPolys: currentMutations.updateObjectFatherPolys.length,
+        updateObjectIds: currentMutations.updateObjectIds.length,
+        deleteObjectIds: currentMutations.deleteObjectIds.length,
+      },
+    });
     try {
       const resp = await fetch("/api/export", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ snapshot, mutations, base }),
+        body: JSON.stringify({ snapshot, mutations: currentMutations, base }),
       });
       const json: ExportResponse = await resp.json();
       if (!json.success) {
         setError(`Export failed: ${json.error}`);
+        logEvent("export failed", { error: json.error });
         return;
       }
+      logEvent("export ok", { snapshot });
       // Reload data (will serve from exported/ now)
       const newData = await loadSceneGraph(`/api/scene-graph?snapshot=${snapshot}`);
       setData(newData);
@@ -1088,10 +1140,11 @@ export function App() {
       setError(null);
     } catch (e: any) {
       setError(`Export error: ${e.message}`);
+      logEvent("export error", { error: e.message });
     } finally {
       setExporting(false);
     }
-  }, [dirty, exporting, snapshot, mutations, base]);
+  }, [exporting, snapshot, base]);
 
   // ---- layer toggle ----
 

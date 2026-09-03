@@ -23,6 +23,7 @@ export function mutationCount(m: Mutations): number {
     m.createPoly.length +
     m.updateObjectLabels.length +
     m.updateObjectFatherPolys.length +
+    m.updateObjectIds.length +
     m.deleteObjectIds.length
   );
 }

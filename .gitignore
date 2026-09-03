@@ -16,6 +16,9 @@ __pycache__/
 # Build output
 frontend/dist/
 
+# Runtime logs
+logs/
+
 # Editor/IDE
 .vscode/
 .idea/

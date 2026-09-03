@@ -17,6 +17,8 @@ import {
   statSync,
   copyFileSync,
   renameSync,
+  appendFileSync,
+  rmSync,
 } from "node:fs";
 import { readdir, copyFile, mkdir } from "node:fs/promises";
 import { join, dirname } from "node:path";
@@ -582,7 +584,6 @@ function renameObjectFiles(
       const oldName = `object_${r.oldId}_${kind}.pcd`;
       const newName = `object_${r.newId}_${kind}.pcd`;
       const oldPath = join(exportedObjects, oldName);
-
       let haveOld = true;
       try {
         statSync(oldPath);
@@ -600,6 +601,39 @@ function renameObjectFiles(
       }
     }
   }
+}
+
+/**
+ * Delete files in exported/objects/ that the final scene_graph.json does not
+ * reference. copyObjectsDir re-pulls every saved/ file each export, which
+ * resurrects stale files under names that earlier exports renamed away
+ * (e.g. object_11_* after 11→12); saved/ may also contain orphans that no
+ * JSON ever referenced. Referenced files are kept; everything else goes.
+ */
+function pruneUnreferencedObjects(exportedDir: string): number {
+  const exportedObjects = join(exportedDir, "objects");
+  const root = readJson(join(exportedDir, "scene_graph.json"));
+  const referenced = new Set<string>();
+  for (const o of root.objects || []) {
+    for (const key of ["cloud", "obb_axis", "obb_corners"]) {
+      const p = o?.files?.[key];
+      if (typeof p === "string" && p.includes("/")) {
+        referenced.add(p.slice(p.lastIndexOf("/") + 1));
+      }
+    }
+  }
+  let removed = 0;
+  try {
+    for (const f of readdirSync(exportedObjects)) {
+      if (!referenced.has(f)) {
+        rmSync(join(exportedObjects, f));
+        removed++;
+      }
+    }
+  } catch {
+    // no objects dir — ok
+  }
+  return removed;
 }
 
 function findLatestSnapshot(baseDir: string): string {
@@ -636,14 +670,63 @@ function sendJson(res: ServerResponse, status: number, body: any): void {
   res.end(json);
 }
 
+// ---- File logger (logs/YYYY-MM-DD.log) ----
+
+let logDir: string | null = null;
+
+function logToFile(scope: string, event: string, detail?: unknown): void {
+  if (!logDir) return;
+  try {
+    const now = new Date();
+    const dateTag = now.toISOString().slice(0, 10);
+    const line =
+      `${now.toISOString()} [${scope}] ${event}` +
+      (detail !== undefined ? ` ${JSON.stringify(detail)}` : "") +
+      "\n";
+    appendFileSync(join(logDir, `${dateTag}.log`), line);
+  } catch {
+    /* logging must never break the request */
+  }
+}
+
 // ---- Vite plugin ----
 
 export function apiPlugin(): Plugin {
   const PROJECT_ROOT = join(import.meta.dirname, "..");
 
+  // Initialize the log directory on plugin setup: logs/YYYY-MM-DD.log
+  logDir = join(PROJECT_ROOT, "logs");
+  mkdirSync(logDir, { recursive: true });
+  logToFile("server", "dev server starting");
+
   return {
     name: "scenegraph-api",
     configureServer(server: ViteDevServer) {
+      // Client-side event sink: the web editor POSTs UI events here so they
+      // land in the same dated log file as backend events.
+      server.middlewares.use(
+        "/api/log",
+        async (req: IncomingMessage, res: ServerResponse) => {
+          if (req.method !== "POST") {
+            sendJson(res, 405, { success: false, error: "Method not allowed" });
+            return;
+          }
+          try {
+            const body = await readBody(req);
+            const entry = JSON.parse(body);
+            logToFile(
+              "client",
+              String(entry?.event ?? "unknown"),
+              entry?.detail,
+            );
+            sendJson(res, 200, { success: true });
+          } catch (err: any) {
+            logToFile("client", "log post failed", { error: err.message });
+            sendJson(res, 400, { success: false, error: err.message });
+          }
+        },
+      );
+
       server.middlewares.use(
         "/api/export",
         async (req: IncomingMessage, res: ServerResponse) => {
@@ -665,6 +748,12 @@ export function apiPlugin(): Plugin {
           try {
             const body = await readBody(req);
             const payload: ExportRequest = JSON.parse(body);
+            const t0 = Date.now();
+            logToFile("export", "request", {
+              snapshot: payload.snapshot,
+              base: payload.base,
+              renameCount: payload.mutations?.updateObjectIds?.length ?? 0,
+            });
             const savedDir = join(
               PROJECT_ROOT,
               "scene_graph_saved",
@@ -711,9 +800,17 @@ export function apiPlugin(): Plugin {
 
             await copyObjectsDir(savedDir, exportedDir);
             renameObjectFiles(savedDir, exportedDir, appliedRenames);
+            const pruned = pruneUnreferencedObjects(exportedDir);
 
+            logToFile("export", "ok", {
+              snapshot: payload.snapshot,
+              renames: appliedRenames,
+              prunedFiles: pruned,
+              elapsedMs: Date.now() - t0,
+            });
             sendJson(res, 200, { success: true });
           } catch (err: any) {
+            logToFile("export", "error", { error: err.message });
             sendJson(res, 500, { success: false, error: err.message });
           }
         },
