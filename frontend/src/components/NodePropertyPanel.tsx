@@ -4,15 +4,16 @@ import type { TopologicalNode } from "../lib/types";
 interface Props {
   node: TopologicalNode;
   onChangePosition: (id: number, center: [number, number, number]) => void;
+  onDelete: (id: number) => void;
 }
 
 type Axis = "x" | "y" | "z";
 
 /**
  * Property panel shown when exactly one topological node is selected in edit mode.
- * Displays node metadata and allows editing X/Y/Z position.
+ * Displays node metadata and allows editing X/Y/Z position and deleting the node.
  */
-export function NodePropertyPanel({ node, onChangePosition }: Props) {
+export function NodePropertyPanel({ node, onChangePosition, onDelete }: Props) {
   const [localX, setLocalX] = useState(node.position[0]);
   const [localY, setLocalY] = useState(node.position[1]);
   const [localZ, setLocalZ] = useState(node.position[2]);
@@ -42,11 +43,11 @@ export function NodePropertyPanel({ node, onChangePosition }: Props) {
       data-overlay
       style={{
         background: "rgba(0,0,0,0.82)",
-        borderRadius: 8,
-        padding: "14px 18px",
+        borderRadius: 6,
+        padding: "10px 12px",
         color: "#ccc",
         fontFamily: "monospace",
-        fontSize: 14,
+        fontSize: 12,
         minWidth: 0,
         userSelect: "none",
       }}
@@ -55,8 +56,8 @@ export function NodePropertyPanel({ node, onChangePosition }: Props) {
         style={{
           color: "#fff",
           fontWeight: 600,
-          marginBottom: 10,
-          fontSize: 15,
+          marginBottom: 6,
+          fontSize: 13,
         }}
       >
         Node Properties
@@ -66,9 +67,9 @@ export function NodePropertyPanel({ node, onChangePosition }: Props) {
       <Row label="ID" value={String(node.id)} />
       <Row label="Area ID" value={String(node.areaId)} />
 
-      <div style={{ margin: "8px 0 6px", borderTop: "1px solid #333" }} />
+      <div style={{ margin: "6px 0 4px", borderTop: "1px solid #333" }} />
 
-      <div style={{ fontSize: 12, color: "#888", marginBottom: 6 }}>
+      <div style={{ fontSize: 11, color: "#888", marginBottom: 4 }}>
         Position
       </div>
 
@@ -91,6 +92,25 @@ export function NodePropertyPanel({ node, onChangePosition }: Props) {
         commitAxis={commitAxis}
       />
 
+      <div style={{ margin: "6px 0 4px", borderTop: "1px solid #333" }} />
+
+      <button
+        type="button"
+        onClick={() => onDelete(node.id)}
+        style={{
+          width: "100%",
+          background: "rgba(200,50,50,0.2)",
+          border: "1px solid rgba(200,50,50,0.4)",
+          borderRadius: 4,
+          color: "#e55",
+          padding: "4px 10px",
+          cursor: "pointer",
+          fontFamily: "monospace",
+          fontSize: 12,
+        }}
+      >
+        Delete Node
+      </button>
     </div>
   );
 }
@@ -110,11 +130,11 @@ function AxisRow({
 }) {
   // Draft string for the number input lets the user clear/type partial values
   // without immediately collapsing "" → 0 or "e" → NaN into committed state.
-  const [draft, setDraft] = useState(String(localValue));
+  const [draft, setDraft] = useState(localValue.toFixed(5));
   const draftRef = useRef(localValue);
   const committedRef = useRef(false);
   useEffect(() => {
-    setDraft(String(localValue));
+    setDraft(localValue.toFixed(5));
     draftRef.current = localValue;
   }, [localValue]);
 
@@ -127,9 +147,9 @@ function AxisRow({
   );
 
   const commitFromDraft = useCallback(() => {
-    const v = Number(draft);
+    const v = Number(Number(draft).toFixed(5));
     if (!Number.isFinite(v)) {
-      setDraft(String(localValue));
+      setDraft(localValue.toFixed(5));
       return;
     }
     setLocal(v);
@@ -159,16 +179,16 @@ function AxisRow({
   // entry when the drag/keyboard interaction ends (pointerup / keyup).
   const handleSliderChange = useCallback(
     (e: React.ChangeEvent<HTMLInputElement>) => {
-      const v = Number(e.target.value);
+      const v = Number(Number(e.target.value).toFixed(5));
       draftRef.current = v;
-      setDraft(String(v));
+      setDraft(v.toFixed(5));
       setLocal(v);
     },
     [setLocal],
   );
 
   const commitSlider = useCallback(() => {
-    const v = draftRef.current;
+    const v = Number(draftRef.current.toFixed(5));
     if (Number.isFinite(v)) {
       commitAxis(axis, v);
     }
@@ -178,7 +198,7 @@ function AxisRow({
   const sliderMax = Math.max(localValue + 10, 100);
 
   return (
-    <div style={{ marginBottom: 4 }}>
+    <div style={{ marginBottom: 2 }}>
       {/* Label + number input */}
       <div
         style={{
@@ -191,10 +211,10 @@ function AxisRow({
         <span
           style={{
             display: "inline-block",
-            width: 16,
+            width: 14,
             color: "#3498db",
             fontWeight: 600,
-            fontSize: 13,
+            fontSize: 12,
             textTransform: "uppercase",
           }}
         >
@@ -202,32 +222,32 @@ function AxisRow({
         </span>
         <input
           type="number"
-          step={0.1}
+          step={0.00001}
           value={draft}
           onChange={handleInputChange}
           onBlur={handleInputBlur}
           onKeyDown={handleInputKeyDown}
           style={{
-            width: 80,
+            width: 90,
             background: "#1a1a2e",
             color: "#eee",
             border: "1px solid #3498db",
             borderRadius: 4,
-            padding: "5px 8px",
+            padding: "3px 6px",
             fontFamily: "monospace",
-            fontSize: 14,
+            fontSize: 12,
             textAlign: "right",
           }}
         />
       </div>
 
       {/* Slider */}
-      <div style={{ marginTop: 3, paddingLeft: 0 }}>
+      <div style={{ marginTop: 2, paddingLeft: 0 }}>
         <input
           type="range"
           min={sliderMin}
           max={sliderMax}
-          step={0.05}
+          step={0.00001}
           value={localValue}
           onChange={handleSliderChange}
           onPointerUp={commitSlider}
@@ -243,7 +263,7 @@ function AxisRow({
           style={{
             display: "flex",
             justifyContent: "space-between",
-            fontSize: 11,
+            fontSize: 10,
             color: "#555",
             marginTop: 1,
           }}
@@ -271,15 +291,16 @@ function Row({
         display: "flex",
         alignItems: "center",
         gap: 6,
-        padding: "2px 0",
+        padding: "1px 0",
       }}
     >
       <span
         style={{
           display: "inline-block",
-          width: 50,
+          width: 80,
           color: "#aaa",
-          fontSize: 13,
+          fontSize: 11,
+          whiteSpace: "nowrap",
         }}
       >
         {label}

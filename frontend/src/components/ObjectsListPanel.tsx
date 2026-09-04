@@ -1,5 +1,5 @@
 import { useState, useCallback } from "react";
-import type { SceneObject, TopologicalNode } from "../lib/types";
+import type { SceneObject } from "../lib/types";
 
 interface Props {
   objects: SceneObject[];
@@ -7,10 +7,8 @@ interface Props {
   onSelect: (id: number) => void;
   /** Called with the full effective object-id order after a drag reorder */
   onChangeOrder: (order: number[]) => void;
-  /** Node lookup keyed by id, for showing each object's father-poly node */
-  nodesById: Map<number, TopologicalNode>;
-  selectedNodeIds: Set<number>;
-  onSelectNode: (id: number) => void;
+  /** Double-click: focus the camera on this object's linked node */
+  onDoubleClick: (id: number) => void;
 }
 
 /**
@@ -23,9 +21,7 @@ export function ObjectsListPanel({
   selectedIds,
   onSelect,
   onChangeOrder,
-  nodesById,
-  selectedNodeIds,
-  onSelectNode,
+  onDoubleClick,
 }: Props) {
   const [collapsed, setCollapsed] = useState(false);
   const [filter, setFilter] = useState("");
@@ -160,9 +156,7 @@ export function ObjectsListPanel({
                 dragging={dragId === o.id}
                 dragOver={dragOverId === o.id}
                 onSelect={onSelect}
-                nodesById={nodesById}
-                selectedNodeIds={selectedNodeIds}
-                onSelectNode={onSelectNode}
+                onDoubleClick={onDoubleClick}
                 onDragStartHandle={() => setDragId(o.id)}
                 onDragEndHandle={() => {
                   setDragId(null);
@@ -185,9 +179,7 @@ function ObjectRow({
   dragging,
   dragOver,
   onSelect,
-  nodesById,
-  selectedNodeIds,
-  onSelectNode,
+  onDoubleClick,
   onDragStartHandle,
   onDragEndHandle,
   onDragOverRow,
@@ -198,24 +190,23 @@ function ObjectRow({
   dragging: boolean;
   dragOver: boolean;
   onSelect: (id: number) => void;
-  nodesById: Map<number, TopologicalNode>;
-  selectedNodeIds: Set<number>;
-  onSelectNode: (id: number) => void;
+  onDoubleClick: (id: number) => void;
   onDragStartHandle: () => void;
   onDragEndHandle: () => void;
   onDragOverRow: () => void;
   onDropRow: () => void;
 }) {
-  const node =
-    object.fatherPolyId >= 0 ? nodesById.get(object.fatherPolyId) : undefined;
-  const nodeSelected = node ? selectedNodeIds.has(node.id) : false;
-
   return (
     <div
       onClick={(e) => {
         const el = e.target as HTMLElement;
         if (el.closest("[data-drag-handle]")) return;
         onSelect(object.id);
+      }}
+      onDoubleClick={(e) => {
+        const el = e.target as HTMLElement;
+        if (el.closest("[data-drag-handle]")) return;
+        onDoubleClick(object.id);
       }}
       onDragOver={(e) => {
         e.preventDefault();
@@ -283,33 +274,6 @@ function ObjectRow({
       >
         {object.label}
       </span>
-      {node && (
-        <span
-          data-node-chip
-          onClick={(e) => {
-            e.stopPropagation();
-            onSelectNode(node.id);
-          }}
-          title={`Select node ${node.id} (area ${node.areaId})`}
-          style={{
-            flexShrink: 0,
-            cursor: "pointer",
-            color: nodeSelected ? "#fff" : "#8ab4f8",
-            background: nodeSelected
-              ? "rgba(52,152,219,0.30)"
-              : "rgba(255,255,255,0.04)",
-            border: nodeSelected
-              ? "1px solid rgba(52,152,219,0.55)"
-              : "1px solid #2f3a55",
-            borderRadius: 3,
-            padding: "2px 7px",
-            fontSize: 12,
-            whiteSpace: "nowrap",
-          }}
-        >
-          N{node.id}
-        </span>
-      )}
       <span
         data-drag-handle
         draggable

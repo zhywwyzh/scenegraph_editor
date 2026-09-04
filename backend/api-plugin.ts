@@ -30,6 +30,8 @@ import type {
   UpdateObjectFatherPoly,
   UpdateObjectPosition,
   UpdateObjectId,
+  UpdateArea,
+  UpdateObjectColor,
   Mutations,
   ExportRequest,
 } from "../frontend/src/lib/types";
@@ -100,6 +102,7 @@ function computePlane(
 function applyMutations(root: any, mutations: Mutations): UpdateObjectId[] {
   applyDeletePolys(root, mutations.deletePolyIds);
   applyDeleteAreas(root, mutations.deleteAreaIds);
+  applyUpdateAreas(root, mutations.updateAreas);
   applyMovePolys(root, mutations.movePoly);
   applyRemoveEdges(root, mutations.removeEdges);
   applyAddEdges(root, mutations.addEdges);
@@ -110,6 +113,7 @@ function applyMutations(root: any, mutations: Mutations): UpdateObjectId[] {
   applyUpdateObjectLabels(root, mutations.updateObjectLabels);
   applyUpdateObjectFatherPolys(root, mutations.updateObjectFatherPolys);
   applyUpdateObjectPositions(root, mutations.updateObjectPositions);
+  applyUpdateObjectColors(root, mutations.updateObjectColors);
   applyDeleteObjects(root, mutations.deleteObjectIds);
   applyObjectOrder(root, mutations.objectOrder);
   rebuildCounters(root);
@@ -119,6 +123,15 @@ function applyMutations(root: any, mutations: Mutations): UpdateObjectId[] {
 function applyDeletePolys(root: any, ids: number[]): void {
   if (ids.length === 0) return;
   const idSet = new Set(ids);
+
+  // Remember each deleted poly's area before filtering so we can drop the
+  // object ids of orphaned objects from the matching area.object_ids below.
+  const deletedPolyArea = new Map<number, number>();
+  for (const p of root.polyhedrons || []) {
+    if (idSet.has(Number(p.id))) {
+      deletedPolyArea.set(Number(p.id), Number(p.area_id));
+    }
+  }
 
   root.polyhedrons = (root.polyhedrons || []).filter(
     (p: any) => !idSet.has(Number(p.id)),
@@ -144,6 +157,18 @@ function applyDeletePolys(root: any, ids: number[]): void {
     if (idSet.has(fp)) {
       if (!obj.edge) obj.edge = {};
       obj.edge.father_poly_id = -1;
+
+      // The object no longer belongs to the deleted poly's area, so remove
+      // it from that area.object_ids to keep the manifest consistent.
+      const areaId = deletedPolyArea.get(fp) ?? -1;
+      if (areaId >= 0) {
+        const area = (root.areas || []).find((a: any) => Number(a.id) === areaId);
+        if (area && Array.isArray(area.object_ids)) {
+          area.object_ids = area.object_ids.filter(
+            (oid: any) => Number(oid) !== Number(obj.id),
+          );
+        }
+      }
     }
   }
 
@@ -175,6 +200,30 @@ function applyDeleteAreas(root: any, ids: number[]): void {
     area.neighbor_area_ids = (area.neighbor_area_ids || []).filter(
       (nid: any) => !idSet.has(Number(nid)),
     );
+  }
+  // Drop dangling area references so reloaded polys fall back to "no area"
+  // instead of pointing at a deleted area id.
+  for (const poly of root.polyhedrons || []) {
+    if (idSet.has(Number(poly.area_id))) {
+      poly.area_id = -1;
+    }
+  }
+}
+
+/**
+ * Update area metadata in place: rename (room_label) and/or recolor (color,
+ * kept in the same 0–1 float-per-channel format as the raw JSON).
+ */
+function applyUpdateAreas(root: any, updates: UpdateArea[]): void {
+  if (!updates || updates.length === 0) return;
+  const areaMap = new Map<number, any>();
+  for (const a of root.areas || []) areaMap.set(Number(a.id), a);
+
+  for (const u of updates) {
+    const area = areaMap.get(Number(u.id));
+    if (!area) continue;
+    if (u.roomLabel !== undefined) area.room_label = u.roomLabel;
+    if (u.color !== undefined) area.color = [...u.color];
   }
 }
 
@@ -503,11 +552,48 @@ function applyUpdateObjectFatherPolys(root: any, updates: UpdateObjectFatherPoly
   const objMap = new Map<number, any>();
   for (const o of root.objects || []) objMap.set(Number(o.id), o);
 
+  const polyMap = new Map<number, any>();
+  for (const p of root.polyhedrons || []) polyMap.set(Number(p.id), p);
+
+  const areaMap = new Map<number, any>();
+  for (const a of root.areas || []) areaMap.set(Number(a.id), a);
+
+  const removeId = (list: any[] | undefined, id: number): any[] | undefined => {
+    if (!Array.isArray(list)) return list;
+    return list.filter((x: any) => Number(x) !== id);
+  };
+  const addId = (list: any[] | undefined, id: number): any[] => {
+    if (!Array.isArray(list)) return [id];
+    return list.some((x: any) => Number(x) === id) ? list : [...list, id];
+  };
+
   for (const u of updates) {
     const obj = objMap.get(u.objectId);
     if (!obj) continue;
+    const objectId = Number(u.objectId);
+    const newFather = Number(u.fatherPolyId);
+    const oldFather = Number(obj?.edge?.father_poly_id ?? -1);
+    if (oldFather === newFather) continue;
+
     if (!obj.edge) obj.edge = {};
-    obj.edge.father_poly_id = u.fatherPolyId;
+    obj.edge.father_poly_id = newFather;
+
+    // Keep poly.object_ids in sync with the new father poly.
+    const oldPoly = polyMap.get(oldFather);
+    const newPoly = polyMap.get(newFather);
+    if (oldPoly) oldPoly.object_ids = removeId(oldPoly.object_ids, objectId);
+    if (newPoly) newPoly.object_ids = addId(newPoly.object_ids, objectId);
+
+    // If the object crosses an area boundary, move it between the two
+    // area.object_ids lists so the exported JSON stays internally consistent.
+    const oldAreaId = oldPoly ? Number(oldPoly.area_id) : -1;
+    const newAreaId = newPoly ? Number(newPoly.area_id) : -1;
+    if (oldAreaId !== newAreaId) {
+      const oldArea = areaMap.get(oldAreaId);
+      if (oldArea) oldArea.object_ids = removeId(oldArea.object_ids, objectId);
+      const newArea = areaMap.get(newAreaId);
+      if (newArea) newArea.object_ids = addId(newArea.object_ids, objectId);
+    }
   }
 }
 
@@ -520,6 +606,22 @@ function applyUpdateObjectPositions(root: any, updates: UpdateObjectPosition[]):
     const obj = objMap.get(u.id);
     if (!obj) continue;
     obj.pos = [...u.position] as V3;
+  }
+}
+
+/**
+ * Update object color in place. Object colors are stored as 0–255 integer
+ * RGB per channel (unlike areas, which use 0–1 floats).
+ */
+function applyUpdateObjectColors(root: any, updates: UpdateObjectColor[]): void {
+  if (updates.length === 0) return;
+  const objMap = new Map<number, any>();
+  for (const o of root.objects || []) objMap.set(Number(o.id), o);
+
+  for (const u of updates) {
+    const obj = objMap.get(u.id);
+    if (!obj) continue;
+    obj.color = [...u.color];
   }
 }
 
@@ -703,6 +805,8 @@ async function copyObjectsDir(
   }
 }
 
+let tempRenameCounter = 0;
+
 /**
  * Rename object PCD files in exported/objects to match applied id renames.
  * Runs AFTER copyObjectsDir so the original files are present. If a source
@@ -721,8 +825,13 @@ function renameObjectFiles(
   const exportedObjects = join(exportedDir, "objects");
   mkdirSync(exportedObjects, { recursive: true });
 
-  for (const r of renames) {
-    for (const kind of ["cloud", "obb_axis", "obb_corners"]) {
+  // Rename via unique temp names in two phases. A naive `old → new` in
+  // application order can overwrite a file when one rename's target id equals
+  // another rename's source id (e.g. 1→5 and 5→6). Moving every source file
+  // to a temp name first frees all source paths before writing the finals.
+  for (const kind of ["cloud", "obb_axis", "obb_corners"]) {
+    const moves: { oldPath: string; newPath: string }[] = [];
+    for (const r of renames) {
       const oldName = `object_${r.oldId}_${kind}.pcd`;
       const newName = `object_${r.newId}_${kind}.pcd`;
       const oldPath = join(exportedObjects, oldName);
@@ -739,8 +848,21 @@ function renameObjectFiles(
         }
       }
       if (haveOld) {
-        renameSync(oldPath, join(exportedObjects, newName));
+        moves.push({ oldPath, newPath: join(exportedObjects, newName) });
       }
+    }
+
+    const temps: { tempPath: string; newPath: string }[] = [];
+    for (let i = 0; i < moves.length; i++) {
+      const tempPath = join(
+        exportedObjects,
+        `__tmp_rename_${tempRenameCounter++}_${kind}.pcd`,
+      );
+      renameSync(moves[i].oldPath, tempPath);
+      temps.push({ tempPath, newPath: moves[i].newPath });
+    }
+    for (const t of temps) {
+      renameSync(t.tempPath, t.newPath);
     }
   }
 }
@@ -787,11 +909,12 @@ function findLatestSnapshot(baseDir: string): string {
       return false;
     }
   });
-  entries.sort(
-    (a, b) =>
-      statSync(join(baseDir, b.name)).mtimeMs -
-      statSync(join(baseDir, a.name)).mtimeMs,
-  );
+  entries.sort((a, b) => {
+    const ma = statSync(join(baseDir, a.name)).mtimeMs;
+    const mb = statSync(join(baseDir, b.name)).mtimeMs;
+    if (mb !== ma) return mb - ma;
+    return b.name.localeCompare(a.name);
+  });
   return entries[0]?.name ?? "";
 }
 
@@ -951,7 +1074,10 @@ export function apiPlugin(): Plugin {
                 area_count: (root.areas || []).length,
                 object_count: (root.objects || []).length,
                 saved_cloud_num: (root.objects || []).filter(
-                  (o: any) => o?.files?.cloud,
+                  (o: any) =>
+                    o?.files?.cloud ||
+                    o?.files?.obb_axis ||
+                    o?.files?.obb_corners,
                 ).length,
               },
             };
@@ -1005,13 +1131,23 @@ export function apiPlugin(): Plugin {
               const mpath = join(savedDir, e.name, "manifest.json");
               let meta: any = {};
               try { meta = readJson(mpath); } catch {}
+              let mtimeMs = 0;
+              try { mtimeMs = statSync(join(savedDir, e.name)).mtimeMs; } catch {}
               return {
                 name: e.name,
                 saved_at: meta.saved_at || "",
                 summary: meta.summary || {},
+                mtimeMs,
               };
             });
-            snapshots.sort((a, b) => b.saved_at.localeCompare(a.saved_at));
+            // Prefer newest directory mtime, then newest directory name. This
+            // avoids the stale manifest.saved_at problem (multiple snapshots
+            // copied from the same source share an identical saved_at, which
+            // made Array#sort unstable and picked the wrong "latest").
+            snapshots.sort((a, b) => {
+              if (b.mtimeMs !== a.mtimeMs) return b.mtimeMs - a.mtimeMs;
+              return b.name.localeCompare(a.name);
+            });
             sendJson(res, 200, { snapshots });
           } catch (err: any) {
             sendJson(res, 500, { success: false, error: err.message });
@@ -1050,11 +1186,13 @@ export function apiPlugin(): Plugin {
             if (source === "saved") {
               jsonPath = savedPath;
             } else if (source === "exported") {
-              if (!statSync(exportedPath).isFile()) {
+              try {
+                statSync(exportedPath);
+                jsonPath = exportedPath;
+              } catch {
                 sendJson(res, 404, { success: false, error: "No export found" });
                 return;
               }
-              jsonPath = exportedPath;
             } else {
               try { statSync(exportedPath); jsonPath = exportedPath; }
               catch { jsonPath = savedPath; }
@@ -1093,7 +1231,7 @@ export function apiPlugin(): Plugin {
             } else {
               const snapshot = url.searchParams.get("snapshot");
               const relPath = url.searchParams.get("path");
-              if (!snapshot || !isValidSnapshotName(snapshot) || !relPath || relPath.includes("..") || relPath.startsWith("/")) {
+              if (!snapshot || !isValidSnapshotName(snapshot) || !relPath || relPath.includes("..") || relPath.startsWith("/") || !relPath.startsWith("objects/")) {
                 sendJson(res, 400, { success: false, error: "Missing/invalid snapshot or path" });
                 return;
               }

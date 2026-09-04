@@ -1,4 +1,4 @@
-import type { Mutations, EdgeRef } from "./types";
+import type { Mutations, EdgeRef, UpdateArea, UpdateObjectColor } from "./types";
 
 export function emptyMutations(): Mutations {
   return {
@@ -14,6 +14,8 @@ export function emptyMutations(): Mutations {
     updateObjectIds: [],
     deleteObjectIds: [],
     objectOrder: [],
+    updateAreas: [],
+    updateObjectColors: [],
   };
 }
 
@@ -30,7 +32,9 @@ export function mutationCount(m: Mutations): number {
     m.updateObjectPositions.length +
     m.updateObjectIds.length +
     m.deleteObjectIds.length +
-    (m.objectOrder?.length ? 1 : 0)
+    (m.objectOrder?.length ? 1 : 0) +
+    m.updateAreas.length +
+    m.updateObjectColors.length
   );
 }
 
@@ -50,6 +54,34 @@ export function addDeleteArea(m: Mutations, id: number): Mutations {
   if (m.deleteAreaIds.includes(id)) return m;
   const n = shallowCopy(m);
   n.deleteAreaIds = [...n.deleteAreaIds, id];
+  return n;
+}
+
+/** Add or replace an area label/color update. Deduplicates by area id. */
+export function addUpdateArea(
+  m: Mutations,
+  patch: UpdateArea,
+): Mutations {
+  const n = shallowCopy(m);
+  const idx = n.updateAreas.findIndex((u) => u.id === patch.id);
+  const merged: UpdateArea = idx >= 0
+    ? {
+        id: patch.id,
+        roomLabel: patch.roomLabel ?? n.updateAreas[idx].roomLabel,
+        color: patch.color
+          ? ([...patch.color] as [number, number, number])
+          : n.updateAreas[idx].color,
+      }
+    : {
+        id: patch.id,
+        roomLabel: patch.roomLabel,
+        color: patch.color ? ([...patch.color] as [number, number, number]) : undefined,
+      };
+  if (idx >= 0) {
+    n.updateAreas[idx] = merged;
+  } else {
+    n.updateAreas = [...n.updateAreas, merged];
+  }
   return n;
 }
 
@@ -145,6 +177,25 @@ export function addUpdateObjectPosition(
   return n;
 }
 
+/** Add or replace an object-color update. Deduplicates by object id. */
+export function addUpdateObjectColor(
+  m: Mutations,
+  id: number,
+  color: [number, number, number],
+): Mutations {
+  const n = shallowCopy(m);
+  const idx = n.updateObjectColors.findIndex((u) => u.id === id);
+  const clamped = color.map((c) =>
+    Math.max(0, Math.min(255, Math.round(c))),
+  ) as [number, number, number];
+  if (idx >= 0) {
+    n.updateObjectColors[idx] = { id, color: clamped };
+  } else {
+    n.updateObjectColors = [...n.updateObjectColors, { id, color: clamped }];
+  }
+  return n;
+}
+
 /** Mark an object for deletion. Deduplicates by id. */
 export function addDeleteObject(m: Mutations, id: number): Mutations {
   if (m.deleteObjectIds.includes(id)) return m;
@@ -184,6 +235,9 @@ export function addUpdateObjectId(
     u.objectId === oldId ? { ...u, objectId: newId } : u,
   );
   n.updateObjectPositions = n.updateObjectPositions.map((u) =>
+    u.id === oldId ? { ...u, id: newId } : u,
+  );
+  n.updateObjectColors = n.updateObjectColors.map((u) =>
     u.id === oldId ? { ...u, id: newId } : u,
   );
   n.deleteObjectIds = n.deleteObjectIds.map((id) => (id === oldId ? newId : id));
@@ -227,5 +281,14 @@ function shallowCopy(m: Mutations): Mutations {
     updateObjectIds: m.updateObjectIds.map((x) => ({ ...x })),
     deleteObjectIds: [...m.deleteObjectIds],
     objectOrder: [...(m.objectOrder ?? [])],
+    updateAreas: m.updateAreas.map((x) => ({
+      id: x.id,
+      roomLabel: x.roomLabel,
+      color: x.color ? ([...x.color] as [number, number, number]) : undefined,
+    })),
+    updateObjectColors: m.updateObjectColors.map((x) => ({
+      id: x.id,
+      color: [...x.color] as [number, number, number],
+    })),
   };
 }

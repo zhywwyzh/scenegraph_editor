@@ -51,6 +51,8 @@ import {
   addDeleteObject,
   addCreatePoly,
   addUpdateObjectOrder,
+  addUpdateArea,
+  addUpdateObjectColor,
 } from "./lib/mutations";
 import type {
   SceneData,
@@ -177,6 +179,32 @@ function makeSyntheticNode(
   return { id, areaId, position: center, colorHex: "#3498db" };
 }
 
+/** Convert an RGB color in 0–1 floats to a `#rrggbb` hex string. */
+function rgb01ToHex(rgb: [number, number, number]): string {
+  const t = (x: number) =>
+    Math.max(0, Math.min(255, Math.round(x * 255)))
+      .toString(16)
+      .padStart(2, "0");
+  return `#${t(rgb[0])}${t(rgb[1])}${t(rgb[2])}`;
+}
+
+/** Convert a `#rrggbb` hex string to RGB in 0–1 floats. */
+function hexToRgb01(hex: string): [number, number, number] {
+  const m = /^#?([0-9a-f]{6})$/i.exec(hex.trim());
+  if (!m) return [1, 0, 0];
+  const n = parseInt(m[1], 16);
+  return [((n >> 16) & 255) / 255, ((n >> 8) & 255) / 255, (n & 255) / 255];
+}
+
+/** Convert RGB in 0–255 integers to a `#rrggbb` hex string. */
+function rgb255ToHex(rgb: [number, number, number]): string {
+  const t = (x: number) =>
+    Math.max(0, Math.min(255, Math.round(x)))
+      .toString(16)
+      .padStart(2, "0");
+  return `#${t(rgb[0])}${t(rgb[1])}${t(rgb[2])}`;
+}
+
 function effectiveNodes(
   allNodes: TopologicalNode[],
   m: Mutations,
@@ -258,6 +286,7 @@ function effectiveEdges(
 function effectiveObjects(
   allObjects: SceneObject[],
   m: Mutations,
+  polyAreaMap: Map<number, number>,
 ): SceneObject[] {
   // Apply id renames as a flat injective mapping originalId → finalId.
   // addUpdateObjectId already resolves effective ids back to the original
@@ -272,6 +301,9 @@ function effectiveObjects(
   const fatherPolyMap = new Map(m.updateObjectFatherPolys.map((u) => [u.objectId, u.fatherPolyId]));
   const positionMap = new Map(
     m.updateObjectPositions.map((u) => [u.id, u.position]),
+  );
+  const colorMap = new Map(
+    m.updateObjectColors.map((u) => [u.id, u.color]),
   );
   const result = allObjects
     .filter((o) => {
@@ -290,11 +322,19 @@ function effectiveObjects(
       }
       const newFather = fatherPolyMap.get(obj.id);
       if (newFather !== undefined) {
-        obj = { ...obj, fatherPolyId: newFather };
+        obj = {
+          ...obj,
+          fatherPolyId: newFather,
+          areaId: polyAreaMap.get(newFather) ?? -1,
+        };
       }
       const newPos = positionMap.get(obj.id);
       if (newPos !== undefined) {
         obj = { ...obj, position: [newPos[0], newPos[1], newPos[2]] as [number, number, number] };
+      }
+      const newColor = colorMap.get(obj.id);
+      if (newColor !== undefined) {
+        obj = { ...obj, colorHex: rgb255ToHex(newColor) };
       }
       return obj;
     });
@@ -499,6 +539,58 @@ function ClickHandler({
   return null;
 }
 
+// ---- camera focus (double-click object in list) ----
+
+function CameraFocusController({
+  focusRequest,
+  sceneGroupRef,
+  controlsRef,
+  objects,
+  nodeMap,
+}: {
+  focusRequest: { id: number; nonce: number } | null;
+  sceneGroupRef: RefObject<THREE.Group | null>;
+  controlsRef: RefObject<any>;
+  objects: SceneObject[];
+  nodeMap: Map<number, TopologicalNode>;
+}) {
+  const camera = useThree((s) => s.camera);
+
+  useEffect(() => {
+    if (!focusRequest) return;
+    const sceneGroup = sceneGroupRef.current;
+    const controls = controlsRef.current;
+    if (!sceneGroup || !controls) return;
+
+    const object = objects.find((o) => o.id === focusRequest.id);
+    if (!object) return;
+    const node =
+      object.fatherPolyId >= 0
+        ? nodeMap.get(object.fatherPolyId)
+        : undefined;
+    if (!node) return;
+
+    sceneGroup.updateWorldMatrix(true, false);
+    const objectWorld = sceneGroup.localToWorld(
+      new THREE.Vector3(
+        object.position[0],
+        object.position[1],
+        object.position[2],
+      ),
+    );
+    const nodeWorld = sceneGroup.localToWorld(
+      new THREE.Vector3(node.position[0], node.position[1], node.position[2]),
+    );
+
+    controls.target.copy(objectWorld);
+    camera.position.copy(nodeWorld);
+    camera.lookAt(objectWorld);
+    controls.update();
+  }, [focusRequest, sceneGroupRef, controlsRef, objects, nodeMap, camera]);
+
+  return null;
+}
+
 // ---- scene ----
 
 function Scene({
@@ -526,6 +618,7 @@ function Scene({
   objectSize,
   objectLineThickness,
   selectableKinds,
+  focusRequest,
 }: {
   effectiveNodes: TopologicalNode[];
   effectiveEdges: TopologicalEdge[];
@@ -551,8 +644,10 @@ function Scene({
   objectSize: number;
   objectLineThickness: number;
   selectableKinds: Set<PickKind>;
+  focusRequest: { id: number; nonce: number } | null;
 }) {
   const sceneGroupRef = useRef<THREE.Group>(null);
+  const controlsRef = useRef<any>(null);
   const [hoverTarget, setHoverTarget] = useState<PickTarget>(null);
   const handleHoverTarget = useCallback((target: PickTarget) => {
     setHoverTarget((current) => {
@@ -672,10 +767,18 @@ function Scene({
 
       <gridHelper args={[80, 80, "#333", "#222"]} />
       <OrbitControls
+        ref={controlsRef}
         enableDamping
         dampingFactor={0.1}
         maxDistance={400}
         minDistance={1}
+      />
+      <CameraFocusController
+        focusRequest={focusRequest}
+        sceneGroupRef={sceneGroupRef}
+        controlsRef={controlsRef}
+        objects={tObjects}
+        nodeMap={nodeMap}
       />
     </Canvas>
   );
@@ -740,6 +843,10 @@ export function App() {
     useState<ConnectionNotice | null>(null);
   const [showAddPanel, setShowAddPanel] = useState(false);
   const [showShortcuts, setShowShortcuts] = useState(false);
+  const [focusRequest, setFocusRequest] = useState<{
+    id: number;
+    nonce: number;
+  } | null>(null);
 
   // PCD point cloud loading
   // null = none, "all" = all objects, "scene:NAME" = scene PCD, number = specific object
@@ -1323,15 +1430,29 @@ export function App() {
     () => {
       if (!data) return [];
       const deleted = new Set(mutations.deleteAreaIds);
-      return data.areas.filter((a) => !deleted.has(a.id));
+      const updateMap = new Map(
+        mutations.updateAreas.map((u) => [u.id, u]),
+      );
+      return data.areas
+        .filter((a) => !deleted.has(a.id))
+        .map((a) => {
+          const u = updateMap.get(a.id);
+          if (!u) return a;
+          return {
+            ...a,
+            roomLabel: u.roomLabel ?? a.roomLabel,
+            colorHex: u.color ? rgb01ToHex(u.color) : a.colorHex,
+          };
+        });
     },
     [data, mutations],
   );
 
-  const effectiveTObjects = useMemo(
-    () => (data ? effectiveObjects(data.objects, mutations) : []),
-    [data, mutations],
-  );
+  const effectiveTObjects = useMemo(() => {
+    if (!data) return [];
+    const polyAreaMap = new Map(data.polys.map((p) => [p.id, p.areaId]));
+    return effectiveObjects(data.objects, mutations, polyAreaMap);
+  }, [data, mutations]);
 
   // Node lookup by id, for showing each object's father-poly node in the list.
   const effectiveNodeMap = useMemo(
@@ -1482,7 +1603,6 @@ export function App() {
               gap: 8,
               width: 340,
               maxHeight: "calc(100vh - 90px)",
-              overflowY: "auto",
               flexShrink: 0,
             }}
           >
@@ -1490,17 +1610,21 @@ export function App() {
             objects={effectiveTObjects}
             selectedIds={selectedObjectIds}
             onSelect={(id) => {
-              setSelectedObjectIds(new Set([id]));
+              if (selectedObjectIds.has(id)) {
+                setSelectedObjectIds(new Set());
+              } else {
+                setSelectedObjectIds(new Set([id]));
+              }
               setSelectedNodeIds(new Set());
+            }}
+            onDoubleClick={(id) => {
+              setFocusRequest((prev) => ({
+                id,
+                nonce: (prev?.nonce ?? 0) + 1,
+              }));
             }}
             onChangeOrder={(order) => {
               commitEdit((current) => addUpdateObjectOrder(current, order));
-            }}
-            nodesById={effectiveNodeMap}
-            selectedNodeIds={selectedNodeIds}
-            onSelectNode={(id) => {
-              setSelectedNodeIds(new Set([id]));
-              setSelectedObjectIds(new Set());
             }}
           />
 
@@ -1535,6 +1659,11 @@ export function App() {
                         addUpdateObjectPosition(current, id, position),
                       );
                     }}
+                    onColor={(id, color) => {
+                      commitEdit((current) =>
+                        addUpdateObjectColor(current, id, color),
+                      );
+                    }}
                     onDelete={(id) => {
                       commitEdit((current) => addDeleteObject(current, id));
                       setSelectedObjectIds(new Set());
@@ -1548,6 +1677,10 @@ export function App() {
                           addMovePoly(current, id, center),
                         );
                       }}
+                      onDelete={(id) => {
+                        commitEdit((current) => addDeletePoly(current, id));
+                        setSelectedNodeIds(new Set());
+                      }}
                     />
                   )}
                 </>
@@ -1560,6 +1693,10 @@ export function App() {
               onChangePosition={(id, center) => {
                 commitEdit((current) => addMovePoly(current, id, center));
               }}
+              onDelete={(id) => {
+                commitEdit((current) => addDeletePoly(current, id));
+                setSelectedNodeIds(new Set());
+              }}
             />
           )}
           </div>
@@ -1571,6 +1708,14 @@ export function App() {
             onDelete={(id) => {
               commitEdit((current) => addDeleteArea(current, id));
               if (id === selectedArea) setSelectedArea(null);
+            }}
+            onRename={(id, label) => {
+              commitEdit((current) =>
+                addUpdateArea(current, { id, roomLabel: label }),
+              );
+            }}
+            onColor={(id, color) => {
+              commitEdit((current) => addUpdateArea(current, { id, color }));
             }}
           />
         </div>
@@ -1925,6 +2070,7 @@ export function App() {
           objectSize={objectSize}
           objectLineThickness={objectLineThickness}
           selectableKinds={selectableKinds}
+          focusRequest={focusRequest}
         />
       ) : loading ? (
         <div
@@ -1957,11 +2103,15 @@ function AreaListPanel({
   selectedArea,
   onSelect,
   onDelete,
+  onRename,
+  onColor,
 }: {
   areas: PreprocessedArea[];
   selectedArea: number | null;
   onSelect: (id: number | null) => void;
   onDelete: (id: number) => void;
+  onRename: (id: number, label: string) => void;
+  onColor: (id: number, color: [number, number, number]) => void;
 }) {
   const [collapsed, setCollapsed] = useState(false);
 
@@ -1973,7 +2123,7 @@ function AreaListPanel({
         borderRadius: 8,
         padding: "12px 16px",
         fontSize: 14,
-        minWidth: 240,
+        minWidth: 260,
         maxHeight: "calc(100vh - 90px)",
         overflowY: "auto",
         flexShrink: 0,
@@ -2014,58 +2164,150 @@ function AreaListPanel({
             <div style={{ color: "#666", fontSize: 12 }}>No areas</div>
           )}
           {areas.map((a) => (
-            <div
+            <AreaRow
               key={a.id}
-              onClick={() => onSelect(a.id === selectedArea ? null : a.id)}
-              style={{
-                display: "flex",
-                alignItems: "center",
-                gap: 10,
-                padding: "4px 6px",
-                cursor: "pointer",
-                borderRadius: 4,
-                background:
-                  a.id === selectedArea ? "rgba(255,255,255,0.1)" : "transparent",
-              }}
-            >
-              <span
-                style={{
-                  width: 14,
-                  height: 14,
-                  borderRadius: 3,
-                  flexShrink: 0,
-                  backgroundColor: a.colorHex,
-                  border: "1px solid rgba(255,255,255,0.15)",
-                }}
-              />
-              <span style={{ fontSize: 14 }}>{a.roomLabel || `A${a.id}`}</span>
-              <span style={{ color: "#666", marginLeft: "auto", fontSize: 12 }}>
-                {a.polyIds.length}p
-              </span>
-              <button
-                type="button"
-                onClick={(e) => {
-                  e.stopPropagation();
-                  onDelete(a.id);
-                }}
-                style={{
-                  background: "rgba(180,60,60,0.15)",
-                  border: "1px solid rgba(220,80,80,0.5)",
-                  borderRadius: 4,
-                  color: "#e57373",
-                  cursor: "pointer",
-                  fontSize: 12,
-                  padding: "2px 8px",
-                  fontFamily: "monospace",
-                }}
-                title={`Delete Area ${a.id} metadata only (keeps its Polys and Objects)`}
-              >
-                Delete
-              </button>
-            </div>
+              area={a}
+              selected={a.id === selectedArea}
+              onSelect={() => onSelect(a.id === selectedArea ? null : a.id)}
+              onDelete={() => onDelete(a.id)}
+              onRename={onRename}
+              onColor={onColor}
+            />
           ))}
         </>
       )}
+    </div>
+  );
+}
+
+function AreaRow({
+  area,
+  selected,
+  onSelect,
+  onDelete,
+  onRename,
+  onColor,
+}: {
+  area: PreprocessedArea;
+  selected: boolean;
+  onSelect: () => void;
+  onDelete: () => void;
+  onRename: (id: number, label: string) => void;
+  onColor: (id: number, color: [number, number, number]) => void;
+}) {
+  const [nameDraft, setNameDraft] = useState(area.roomLabel);
+  const [colorDraft, setColorDraft] = useState(area.colorHex);
+  const nameCommittedRef = useRef(false);
+
+  useEffect(() => {
+    setNameDraft(area.roomLabel);
+  }, [area.roomLabel]);
+  useEffect(() => {
+    setColorDraft(area.colorHex);
+  }, [area.colorHex]);
+
+  const commitName = useCallback(() => {
+    const v = nameDraft.trim();
+    if (!v) {
+      setNameDraft(area.roomLabel);
+      return;
+    }
+    if (v !== area.roomLabel) onRename(area.id, v);
+  }, [nameDraft, area.roomLabel, area.id, onRename]);
+
+  const commitColor = useCallback(() => {
+    if (colorDraft !== area.colorHex) {
+      onColor(area.id, hexToRgb01(colorDraft));
+    }
+  }, [colorDraft, area.colorHex, area.id, onColor]);
+
+  return (
+    <div
+      onClick={onSelect}
+      style={{
+        display: "flex",
+        alignItems: "center",
+        gap: 8,
+        padding: "4px 6px",
+        cursor: "pointer",
+        borderRadius: 4,
+        background: selected ? "rgba(255,255,255,0.1)" : "transparent",
+      }}
+    >
+      <input
+        type="color"
+        value={colorDraft}
+        onChange={(e) => setColorDraft(e.target.value)}
+        onBlur={commitColor}
+        onClick={(e) => e.stopPropagation()}
+        title={`Change color of Area ${area.id}`}
+        style={{
+          width: 16,
+          height: 16,
+          borderRadius: 3,
+          flexShrink: 0,
+          padding: 0,
+          border: "1px solid rgba(255,255,255,0.15)",
+          background: "transparent",
+          cursor: "pointer",
+        }}
+      />
+      <input
+        type="text"
+        value={nameDraft}
+        onChange={(e) => setNameDraft(e.target.value)}
+        onBlur={() => {
+          if (nameCommittedRef.current) {
+            nameCommittedRef.current = false;
+            return;
+          }
+          commitName();
+        }}
+        onKeyDown={(e) => {
+          if (e.key === "Enter") {
+            nameCommittedRef.current = true;
+            commitName();
+            (e.target as HTMLInputElement).blur();
+          }
+        }}
+        onClick={(e) => e.stopPropagation()}
+        title={`Rename Area ${area.id}`}
+        style={{
+          flex: 1,
+          minWidth: 0,
+          background: "transparent",
+          color: "#ddd",
+          border: "1px solid transparent",
+          borderRadius: 4,
+          padding: "2px 4px",
+          fontFamily: "monospace",
+          fontSize: 13,
+        }}
+      />
+      <span style={{ color: "#666", fontSize: 12, flexShrink: 0 }}>
+        {area.polyIds.length}p
+      </span>
+      <button
+        type="button"
+        onClick={(e) => {
+          e.stopPropagation();
+          onDelete();
+        }}
+        style={{
+          background: "rgba(180,60,60,0.15)",
+          border: "1px solid rgba(220,80,80,0.5)",
+          borderRadius: 4,
+          color: "#e57373",
+          cursor: "pointer",
+          fontSize: 12,
+          padding: "2px 8px",
+          fontFamily: "monospace",
+          flexShrink: 0,
+        }}
+        title={`Delete Area ${area.id} metadata only (keeps its Polys and Objects)`}
+      >
+        Delete
+      </button>
     </div>
   );
 }

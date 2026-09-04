@@ -118,6 +118,19 @@ export interface UpdateObjectId {
   newId: number;
 }
 
+export interface UpdateArea {
+  id: number;
+  roomLabel?: string;
+  /** RGB color in 0–1 float per channel, matching the raw area.color format */
+  color?: [number, number, number];
+}
+
+export interface UpdateObjectColor {
+  id: number;
+  /** RGB color in 0–255 integer per channel, matching the raw object.color format */
+  color: [number, number, number];
+}
+
 export interface Mutations {
   deletePolyIds: number[];
   deleteAreaIds: number[];
@@ -132,6 +145,8 @@ export interface Mutations {
   deleteObjectIds: number[];
   /** Desired order of effective/current object ids for export */
   objectOrder: number[];
+  updateAreas: UpdateArea[];
+  updateObjectColors: UpdateObjectColor[];
 }
 
 export interface ExportRequest {
