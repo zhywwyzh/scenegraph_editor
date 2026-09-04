@@ -6,12 +6,14 @@ interface Props {
   dirty: boolean;
   exporting: boolean;
   showDiff: boolean;
+  showShortcuts: boolean;
   onToggleEdit: () => void;
   onReset: () => void;
   onExport: () => void;
   onAddNode: () => void;
   onShowDiff?: () => void;
   onHideDiff?: () => void;
+  onToggleShortcuts: () => void;
 }
 
 export function EditToolbar({
@@ -20,12 +22,14 @@ export function EditToolbar({
   dirty,
   exporting,
   showDiff,
+  showShortcuts,
   onToggleEdit,
   onReset,
   onExport,
   onAddNode,
   onShowDiff,
   onHideDiff,
+  onToggleShortcuts,
 }: Props) {
   const editing = editMode === "edit";
 
@@ -39,12 +43,12 @@ export function EditToolbar({
         zIndex: 10,
         background: "rgba(0,0,0,0.85)",
         borderRadius: 8,
-        padding: "6px 12px",
+        padding: "8px 16px",
         display: "flex",
         alignItems: "center",
-        gap: 10,
+        gap: 12,
         fontFamily: "monospace",
-        fontSize: 12,
+        fontSize: 14,
         userSelect: "none",
       }}
     >
@@ -81,6 +85,14 @@ export function EditToolbar({
           </button>
 
           <button
+            onClick={onToggleShortcuts}
+            style={showShortcuts ? btnActiveStyle : btnStyle}
+            title="Toggle shortcut help panel"
+          >
+            Shortcuts
+          </button>
+
+          <button
             onClick={onExport}
             disabled={!dirty || exporting}
             style={{
@@ -93,7 +105,7 @@ export function EditToolbar({
           </button>
 
           {mutationCount > 0 && (
-            <span style={{ color: "#f90", fontSize: 11 }}>
+            <span style={{ color: "#f90", fontSize: 13 }}>
               {mutationCount} changes
             </span>
           )}
@@ -108,12 +120,6 @@ export function EditToolbar({
           </button>
         </>
       )}
-
-      {editing && (
-        <span style={{ color: "#666", fontSize: 10, marginLeft: 4 }}>
-          Del=delete &middot; E=connect &middot; C=obj↔node &middot; Esc=clear
-        </span>
-      )}
     </div>
   );
 }
@@ -123,10 +129,10 @@ const btnStyle: React.CSSProperties = {
   border: "1px solid rgba(255,255,255,0.15)",
   borderRadius: 4,
   color: "#ccc",
-  padding: "3px 10px",
+  padding: "5px 14px",
   cursor: "pointer",
   fontFamily: "monospace",
-  fontSize: 12,
+  fontSize: 14,
 };
 
 const btnActiveStyle: React.CSSProperties = {

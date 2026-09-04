@@ -22,7 +22,7 @@ export async function loadSceneGraph(path: string): Promise<SceneData> {
   // Vertex map: {position, connected_vertex_ids}
   const vmap = new Map<number, { pos: [number, number, number]; conn: number[] }>();
   for (const v of root.vertices || []) {
-    vmap.set(v.id, { pos: v.position, conn: v.connected_vertex_ids || [] });
+    vmap.set(v.id, { pos: asV3(v.position), conn: v.connected_vertex_ids || [] });
   }
 
   // Area color lookup

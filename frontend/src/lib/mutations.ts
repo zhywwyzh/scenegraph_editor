@@ -3,12 +3,14 @@ import type { Mutations, EdgeRef } from "./types";
 export function emptyMutations(): Mutations {
   return {
     deletePolyIds: [],
+    deleteAreaIds: [],
     movePoly: [],
     removeEdges: [],
     addEdges: [],
     createPoly: [],
     updateObjectLabels: [],
     updateObjectFatherPolys: [],
+    updateObjectPositions: [],
     updateObjectIds: [],
     deleteObjectIds: [],
     objectOrder: [],
@@ -18,15 +20,17 @@ export function emptyMutations(): Mutations {
 export function mutationCount(m: Mutations): number {
   return (
     m.deletePolyIds.length +
+    m.deleteAreaIds.length +
     m.movePoly.length +
     m.removeEdges.length +
     m.addEdges.length +
     m.createPoly.length +
     m.updateObjectLabels.length +
     m.updateObjectFatherPolys.length +
+    m.updateObjectPositions.length +
     m.updateObjectIds.length +
     m.deleteObjectIds.length +
-    (m.objectOrder?.length ?? 0)
+    (m.objectOrder?.length ? 1 : 0)
   );
 }
 
@@ -40,6 +44,13 @@ export function addDeletePoly(m: Mutations, id: number): Mutations {
   const mp = shallowCopy(m);
   mp.deletePolyIds = [...mp.deletePolyIds, id];
   return mp;
+}
+
+export function addDeleteArea(m: Mutations, id: number): Mutations {
+  if (m.deleteAreaIds.includes(id)) return m;
+  const n = shallowCopy(m);
+  n.deleteAreaIds = [...n.deleteAreaIds, id];
+  return n;
 }
 
 export function addRemoveEdge(m: Mutations, e: EdgeRef): Mutations {
@@ -118,6 +129,22 @@ export function addUpdateObjectFatherPoly(
   return n;
 }
 
+/** Add or replace an object-position update. Deduplicates by object id. */
+export function addUpdateObjectPosition(
+  m: Mutations,
+  id: number,
+  position: [number, number, number],
+): Mutations {
+  const n = shallowCopy(m);
+  const idx = n.updateObjectPositions.findIndex((u) => u.id === id);
+  if (idx >= 0) {
+    n.updateObjectPositions[idx] = { id, position: [...position] as [number, number, number] };
+  } else {
+    n.updateObjectPositions = [...n.updateObjectPositions, { id, position: [...position] as [number, number, number] }];
+  }
+  return n;
+}
+
 /** Mark an object for deletion. Deduplicates by id. */
 export function addDeleteObject(m: Mutations, id: number): Mutations {
   if (m.deleteObjectIds.includes(id)) return m;
@@ -156,6 +183,9 @@ export function addUpdateObjectId(
   n.updateObjectFatherPolys = n.updateObjectFatherPolys.map((u) =>
     u.objectId === oldId ? { ...u, objectId: newId } : u,
   );
+  n.updateObjectPositions = n.updateObjectPositions.map((u) =>
+    u.id === oldId ? { ...u, id: newId } : u,
+  );
   n.deleteObjectIds = n.deleteObjectIds.map((id) => (id === oldId ? newId : id));
   n.objectOrder = (n.objectOrder ?? []).map((id) =>
     id === oldId ? newId : id,
@@ -183,12 +213,17 @@ export function addUpdateObjectId(
 function shallowCopy(m: Mutations): Mutations {
   return {
     deletePolyIds: [...m.deletePolyIds],
+    deleteAreaIds: [...m.deleteAreaIds],
     movePoly: m.movePoly.map((x) => ({ ...x })),
     removeEdges: m.removeEdges.map((x) => ({ ...x })),
     addEdges: m.addEdges.map((x) => ({ ...x })),
     createPoly: m.createPoly.map((x) => ({ areaId: x.areaId, center: [...x.center] as [number, number, number], size: x.size })),
     updateObjectLabels: m.updateObjectLabels.map((x) => ({ ...x })),
     updateObjectFatherPolys: m.updateObjectFatherPolys.map((x) => ({ ...x })),
+    updateObjectPositions: m.updateObjectPositions.map((x) => ({
+      id: x.id,
+      position: [...x.position] as [number, number, number],
+    })),
     updateObjectIds: m.updateObjectIds.map((x) => ({ ...x })),
     deleteObjectIds: [...m.deleteObjectIds],
     objectOrder: [...(m.objectOrder ?? [])],

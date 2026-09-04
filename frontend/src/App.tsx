@@ -1,5 +1,5 @@
 import { useEffect, useState, useMemo, useCallback, useRef } from "react";
-import type { RefObject } from "react";
+import type { CSSProperties, RefObject } from "react";
 import { Canvas, useThree } from "@react-three/fiber";
 import { OrbitControls, PerspectiveCamera } from "@react-three/drei";
 import * as THREE from "three";
@@ -40,11 +40,13 @@ import {
   mutationCount,
   edgeKey,
   addDeletePoly,
+  addDeleteArea,
   addRemoveEdge,
   addAddEdge,
   addMovePoly,
   addUpdateObjectLabel,
   addUpdateObjectFatherPoly,
+  addUpdateObjectPosition,
   addUpdateObjectId,
   addDeleteObject,
   addCreatePoly,
@@ -52,6 +54,7 @@ import {
 } from "./lib/mutations";
 import type {
   SceneData,
+  PreprocessedArea,
   PreprocessedPoly,
   TopologicalNode,
   TopologicalEdge,
@@ -81,8 +84,38 @@ type LayerKey = keyof Layers;
 // very large files (e.g. elec.pcd has 6,559,828 points).
 const SCENE_PCD_MAX_POINTS = 2_000_000;
 
+// Per-object clouds are usually smaller, but cap them too so "All Objects"
+// cannot OOM the tab when many large clouds are loaded at once.
+const OBJECT_PCD_MAX_POINTS = 200_000;
+
+// Load all object clouds with bounded concurrency instead of Promise.all, so a
+// single huge cloud doesn't spawn every fetch/parse at the same time.
+async function loadObjectsWithLimit<T>(
+  items: T[],
+  limit: number,
+  worker: (item: T) => Promise<any>,
+): Promise<any[]> {
+  const results: any[] = new Array(items.length);
+  let next = 0;
+  const runners = Array.from(
+    { length: Math.min(limit, items.length) },
+    async () => {
+      while (next < items.length) {
+        const i = next++;
+        try {
+          results[i] = await worker(items[i]);
+        } catch (e) {
+          results[i] = null;
+        }
+      }
+    },
+  );
+  await Promise.all(runners);
+  return results;
+}
+
 const EDIT_ONLY_LAYERS: Layers = {
-  areas: false,
+  areas: true,
   areaEdges: false,
   areaCenters: false,
   polyPoints: false,
@@ -91,6 +124,35 @@ const EDIT_ONLY_LAYERS: Layers = {
   topoNodes: true,
   topoEdges: true,
   objects: true,
+};
+
+// Shared overlay chrome. Most floating panels share the same dark background,
+// text colour and monospace font; individual panels only override what differs
+// (position, radius, padding, size).
+const DARK_PANEL: CSSProperties = {
+  background: "rgba(0,0,0,0.82)",
+  color: "#ccc",
+  fontFamily: "monospace",
+};
+
+const FLOATING_OVERLAY: CSSProperties = {
+  ...DARK_PANEL,
+  position: "absolute",
+};
+
+const HINT_BAR: CSSProperties = {
+  ...FLOATING_OVERLAY,
+  bottom: 16,
+  left: "50%",
+  transform: "translateX(-50%)",
+  zIndex: 20,
+  display: "flex",
+  alignItems: "center",
+  gap: 10,
+  padding: "7px 10px",
+  borderRadius: 6,
+  color: "#ddd",
+  fontSize: 12,
 };
 
 interface ConnectionNotice {
@@ -208,6 +270,9 @@ function effectiveObjects(
   const deleted = new Set(m.deleteObjectIds);
   const labelMap = new Map(m.updateObjectLabels.map((u) => [u.id, u.label]));
   const fatherPolyMap = new Map(m.updateObjectFatherPolys.map((u) => [u.objectId, u.fatherPolyId]));
+  const positionMap = new Map(
+    m.updateObjectPositions.map((u) => [u.id, u.position]),
+  );
   const result = allObjects
     .filter((o) => {
       const id = idMap.get(o.id) ?? o.id;
@@ -226,6 +291,10 @@ function effectiveObjects(
       const newFather = fatherPolyMap.get(obj.id);
       if (newFather !== undefined) {
         obj = { ...obj, fatherPolyId: newFather };
+      }
+      const newPos = positionMap.get(obj.id);
+      if (newPos !== undefined) {
+        obj = { ...obj, position: [newPos[0], newPos[1], newPos[2]] as [number, number, number] };
       }
       return obj;
     });
@@ -317,19 +386,45 @@ function ClickHandler({
       mouseDown.set(e.clientX, e.clientY);
     };
 
-    const onMove = (e: PointerEvent) => {
-      if (e.buttons !== 0) {
-        onHoverTarget(null);
-        canvas.style.cursor = "";
-        return;
-      }
+    // Throttle hover picking to one pick per animation frame; pointermove can
+    // fire far more often than a frame and each pick is a full projection pass.
+    let rafId: number | null = null;
+    let lastEvent: PointerEvent | null = null;
 
+    const applyHover = () => {
+      rafId = null;
+      if (!lastEvent) return;
+      const e = lastEvent;
+      lastEvent = null;
       const target = targetAt(e);
       onHoverTarget(target);
       canvas.style.cursor = target ? "pointer" : "";
     };
 
+    const onMove = (e: PointerEvent) => {
+      if (e.buttons !== 0) {
+        if (rafId !== null) {
+          cancelAnimationFrame(rafId);
+          rafId = null;
+        }
+        lastEvent = null;
+        onHoverTarget(null);
+        canvas.style.cursor = "";
+        return;
+      }
+
+      lastEvent = e;
+      if (rafId === null) {
+        rafId = requestAnimationFrame(applyHover);
+      }
+    };
+
     const onLeave = () => {
+      if (rafId !== null) {
+        cancelAnimationFrame(rafId);
+        rafId = null;
+      }
+      lastEvent = null;
       onHoverTarget(null);
       canvas.style.cursor = "";
     };
@@ -377,6 +472,11 @@ function ClickHandler({
       canvas.removeEventListener("pointermove", onMove, { capture: true });
       canvas.removeEventListener("pointerleave", onLeave);
       canvas.removeEventListener("click", onClick, { capture: true });
+      if (rafId !== null) {
+        cancelAnimationFrame(rafId);
+        rafId = null;
+      }
+      lastEvent = null;
       canvas.style.cursor = "";
       onHoverTarget(null);
     };
@@ -402,10 +502,10 @@ function ClickHandler({
 // ---- scene ----
 
 function Scene({
-  data,
   effectiveNodes: tNodes,
   effectiveEdges: tEdges,
   effectivePolys,
+  effectiveAreas,
   effectiveObjects: tObjects,
   layers,
   selectedArea,
@@ -427,10 +527,10 @@ function Scene({
   objectLineThickness,
   selectableKinds,
 }: {
-  data: SceneData;
   effectiveNodes: TopologicalNode[];
   effectiveEdges: TopologicalEdge[];
   effectivePolys: PreprocessedPoly[];
+  effectiveAreas: PreprocessedArea[];
   effectiveObjects: SceneObject[];
   layers: Layers;
   selectedArea: number | null;
@@ -472,7 +572,7 @@ function Scene({
 
   const areaBoxes = useMemo(
     () =>
-      data.areas.map((a) => (
+      effectiveAreas.map((a) => (
         <AreaBox
           key={a.id}
           area={a}
@@ -480,7 +580,7 @@ function Scene({
           selected={a.id === selectedArea}
         />
       )),
-    [data, layers.areas, selectedArea],
+    [effectiveAreas, layers.areas, selectedArea],
   );
 
   return (
@@ -492,13 +592,13 @@ function Scene({
       <group ref={sceneGroupRef} rotation={[-Math.PI / 2, 0, 0]}>
         <WorldAxes />
         {areaBoxes}
-        {layers.areaEdges && <AreaEdges areas={data.areas} visible />}
+        {layers.areaEdges && <AreaEdges areas={effectiveAreas} visible />}
         {layers.areaCenters && (
-          <AreaCenters areas={data.areas} visible />
+          <AreaCenters areas={effectiveAreas} visible />
         )}
         {(layers.polyPoints || layers.polyWireframe) && (
           <PolyhedraAll
-            data={data}
+            areas={effectiveAreas}
             effectivePolys={effectivePolys}
             visible={layers.polyPoints}
             showWireframe={layers.polyWireframe}
@@ -613,7 +713,7 @@ export function App() {
     areaCenters: false,
     polyPoints: false,
     polyWireframe: false,
-    polyMesh: true,
+    polyMesh: false,
     topoNodes: true,
     topoEdges: true,
     objects: true,
@@ -639,6 +739,7 @@ export function App() {
   const [connectionNotice, setConnectionNotice] =
     useState<ConnectionNotice | null>(null);
   const [showAddPanel, setShowAddPanel] = useState(false);
+  const [showShortcuts, setShowShortcuts] = useState(false);
 
   // PCD point cloud loading
   // null = none, "all" = all objects, "scene:NAME" = scene PCD, number = specific object
@@ -650,10 +751,10 @@ export function App() {
   const scenePcdCacheRef = useRef(new Map<string, { positions: Float32Array; colorHex: string }>());
 
   // Display controls
-  const [nodeSize, setNodeSize] = useLocalStorageState("disp_nodeSize", 0.12);
-  const [topoEdgeThickness, setTopoEdgeThickness] = useLocalStorageState("disp_topoEdge", 1);
-  const [objectSize, setObjectSize] = useLocalStorageState("disp_objSize", 0.15);
-  const [objectLineThickness, setObjectLineThickness] = useLocalStorageState("disp_objLine", 0.04);
+  const [nodeSize, setNodeSize] = useLocalStorageState("disp_nodeSize_v2", 0.1);
+  const [topoEdgeThickness, setTopoEdgeThickness] = useLocalStorageState("disp_topoEdge_v2", 2);
+  const [objectSize, setObjectSize] = useLocalStorageState("disp_objSize_v2", 0.02);
+  const [objectLineThickness, setObjectLineThickness] = useLocalStorageState("disp_objLine_v2", 0.01);
   const [pcdColorScheme, setPcdColorScheme] = useLocalStorageState<PcdColorScheme>("disp_pcdScheme", "flat");
   const [pcdPointSize, setPcdPointSize] = useLocalStorageState("disp_pcdPtSize", 0.06);
 
@@ -742,18 +843,19 @@ export function App() {
     }
 
     if (selectedPcd === "all") {
-      // Load all object clouds in parallel
+      // Load all object clouds with bounded concurrency and per-object caps.
       setPcdLoading(true);
       const objectsWithCloud = data.objects.filter((o) => o.cloudPath);
-      Promise.all(
-        objectsWithCloud.map((obj) =>
-          loadPcd(`/api/pcd?snapshot=${encodeURIComponent(snapshot)}&path=${encodeURIComponent(obj.cloudPath)}`)
-            .then((r) => ({ key: `obj-${obj.id}`, positions: r.positions, colorHex: obj.colorHex }))
-            .catch((e) => {
-              console.warn(`PCD load failed for object ${obj.id}:`, e);
-              return null;
-            })
-        ),
+      loadObjectsWithLimit(objectsWithCloud, 4, (obj) =>
+        loadPcd(
+          `/api/pcd?snapshot=${encodeURIComponent(snapshot)}&path=${encodeURIComponent(obj.cloudPath)}`,
+          OBJECT_PCD_MAX_POINTS,
+        )
+          .then((r) => ({ key: `obj-${obj.id}`, positions: r.positions, colorHex: obj.colorHex }))
+          .catch((e) => {
+            console.warn(`PCD load failed for object ${obj.id}:`, e);
+            return null;
+          }),
       ).then((results) => {
         setPcdLayers(results.filter((r): r is NonNullable<typeof r> => r !== null));
         setPcdLoading(false);
@@ -1095,6 +1197,9 @@ export function App() {
     setSelectedEdgeKey(null);
     setSelectedObjectIds(new Set());
     setBase("saved");
+    setSelectedPcd(null);
+    setPcdLayers([]);
+    scenePcdCacheRef.current.clear();
     if (snapshot) {
       try {
         setLoading(true);
@@ -1122,6 +1227,9 @@ export function App() {
     setSelectedObjectIds(new Set());
     setBase("saved");
     setError(null);
+    setSelectedPcd(null);
+    setPcdLayers([]);
+    scenePcdCacheRef.current.clear();
   }, [snapshot]);
 
   // ---- export ----
@@ -1146,6 +1254,7 @@ export function App() {
         createPoly: currentMutations.createPoly.length,
         updateObjectLabels: currentMutations.updateObjectLabels.length,
         updateObjectFatherPolys: currentMutations.updateObjectFatherPolys.length,
+        updateObjectPositions: currentMutations.updateObjectPositions.length,
         updateObjectIds: currentMutations.updateObjectIds.length,
         deleteObjectIds: currentMutations.deleteObjectIds.length,
       },
@@ -1210,9 +1319,24 @@ export function App() {
     [data, mutations],
   );
 
+  const effectiveAreas = useMemo(
+    () => {
+      if (!data) return [];
+      const deleted = new Set(mutations.deleteAreaIds);
+      return data.areas.filter((a) => !deleted.has(a.id));
+    },
+    [data, mutations],
+  );
+
   const effectiveTObjects = useMemo(
     () => (data ? effectiveObjects(data.objects, mutations) : []),
     [data, mutations],
+  );
+
+  // Node lookup by id, for showing each object's father-poly node in the list.
+  const effectiveNodeMap = useMemo(
+    () => new Map(effectiveTNodes.map((n) => [n.id, n])),
+    [effectiveTNodes],
   );
 
   const renderedLayers = editMode === "edit" ? EDIT_ONLY_LAYERS : layers;
@@ -1228,12 +1352,14 @@ export function App() {
         dirty={dirty}
         exporting={exporting}
         showDiff={showDiff}
+        showShortcuts={showShortcuts}
         onToggleEdit={handleToggleEdit}
         onReset={handleReset}
         onExport={handleExport}
         onAddNode={() => setShowAddPanel(true)}
         onShowDiff={() => setShowDiff(true)}
         onHideDiff={() => setShowDiff(false)}
+        onToggleShortcuts={() => setShowShortcuts((v) => !v)}
       />
 
       {connectionNotice && (
@@ -1241,8 +1367,8 @@ export function App() {
           data-overlay
           role="status"
           style={{
-            position: "absolute",
-            top: 54,
+            ...FLOATING_OVERLAY,
+            top: 112,
             left: "50%",
             transform: "translateX(-50%)",
             zIndex: 20,
@@ -1255,7 +1381,6 @@ export function App() {
                   ? "rgba(150, 45, 45, 0.94)"
                   : "rgba(105, 85, 20, 0.94)",
             color: "#fff",
-            fontFamily: "monospace",
             fontSize: 12,
             pointerEvents: "none",
           }}
@@ -1264,105 +1389,191 @@ export function App() {
         </div>
       )}
 
-      {/* Snapshot selector */}
+      {/* Snapshot selector + scene graph summary */}
       {snapshots.length > 0 && snapshot !== "" && (
         <div
           data-overlay
           style={{
-            position: "absolute",
-            top: 44,
+            ...FLOATING_OVERLAY,
+            top: 76,
             left: "50%",
             transform: "translateX(-50%)",
             zIndex: 15,
             display: "flex",
-            alignItems: "center",
-            gap: 8,
+            flexDirection: "column",
+            alignItems: "flex-start",
+            gap: 6,
             background: data ? "rgba(0,0,0,0.82)" : "rgba(0,0,0,0.92)",
             borderRadius: 6,
-            padding: "4px 10px",
-            color: "#ccc",
-            fontFamily: "monospace",
-            fontSize: 12,
+            padding: "8px 14px",
+            fontSize: 14,
           }}
         >
-          <span>Snapshot:</span>
-          <select
-            value={snapshot || ""}
-            onChange={(e) => handleSwitchSnapshot(e.target.value)}
-            style={{
-              background: "#222",
-              color: "#ddd",
-              border: "1px solid #555",
-              borderRadius: 4,
-              padding: "2px 6px",
-              fontFamily: "monospace",
-              fontSize: 12,
-              maxWidth: 280,
-            }}
-          >
-            {snapshots.map((s) => (
-              <option key={s.name} value={s.name}>
-                {s.name}
-                {s.summary?.poly_count != null
-                  ? `  · ${s.summary.poly_count}p`
-                  : ""}
-              </option>
-            ))}
-          </select>
+          <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+            <span>Snapshot:</span>
+            <select
+              value={snapshot || ""}
+              onChange={(e) => handleSwitchSnapshot(e.target.value)}
+              style={{
+                background: "#222",
+                color: "#ddd",
+                border: "1px solid #555",
+                borderRadius: 4,
+                padding: "4px 8px",
+                fontFamily: "monospace",
+                fontSize: 14,
+                maxWidth: 320,
+              }}
+            >
+              {snapshots.map((s) => (
+                <option key={s.name} value={s.name}>
+                  {s.name}
+                  {s.summary?.poly_count != null
+                    ? `  · ${s.summary.poly_count}p`
+                    : ""}
+                </option>
+              ))}
+            </select>
+          </div>
           {data && (
-            <span style={{ color: "#666", fontSize: 10 }}>
-              {data.polys.length}p / {data.areas.length}a /{" "}
-              {data.topoEdges.length}e
-            </span>
+            <div
+              style={{
+                display: "flex",
+                alignItems: "center",
+                gap: 12,
+                fontSize: 12,
+                color: "#999",
+                alignSelf: "center",
+              }}
+            >
+              <span>
+                <b style={{ color: "#fff" }}>{data.polys.length}</b> Polygons
+              </span>
+              <span>
+                <b style={{ color: "#fff" }}>{data.topoEdges.length}</b> Edges
+              </span>
+              <span>
+                <b style={{ color: "#fff" }}>{data.areas.length}</b> Areas
+              </span>
+            </div>
           )}
         </div>
       )}
 
       {editMode === "edit" && (
-        <ObjectsListPanel
-          objects={effectiveTObjects}
-          existingIds={effectiveTObjects.map((o) => o.id)}
-          selectedIds={selectedObjectIds}
-          onSelect={(id) => setSelectedObjectIds(new Set([id]))}
-          onChangeId={(oldId, newId) => {
-            commitEdit((current) => addUpdateObjectId(current, oldId, newId));
-            setSelectedObjectIds(new Set([newId]));
+        <div
+          data-overlay
+          style={{
+            position: "absolute",
+            top: 54,
+            left: 16,
+            zIndex: 10,
+            display: "flex",
+            flexDirection: "row",
+            alignItems: "flex-start",
+            gap: 8,
+            maxHeight: "calc(100vh - 90px)",
           }}
-          onChangeLabel={(id, label) => {
-            commitEdit((current) => addUpdateObjectLabel(current, id, label));
-          }}
-          onChangeOrder={(order) => {
-            commitEdit((current) => addUpdateObjectOrder(current, order));
-          }}
-        />
-      )}
+        >
+          <div
+            style={{
+              display: "flex",
+              flexDirection: "column",
+              gap: 8,
+              width: 340,
+              maxHeight: "calc(100vh - 90px)",
+              overflowY: "auto",
+              flexShrink: 0,
+            }}
+          >
+          <ObjectsListPanel
+            objects={effectiveTObjects}
+            selectedIds={selectedObjectIds}
+            onSelect={(id) => {
+              setSelectedObjectIds(new Set([id]));
+              setSelectedNodeIds(new Set());
+            }}
+            onChangeOrder={(order) => {
+              commitEdit((current) => addUpdateObjectOrder(current, order));
+            }}
+            nodesById={effectiveNodeMap}
+            selectedNodeIds={selectedNodeIds}
+            onSelectNode={(id) => {
+              setSelectedNodeIds(new Set([id]));
+              setSelectedObjectIds(new Set());
+            }}
+          />
 
-      {editMode === "edit" && selectedNodeIds.size === 1 && (
-        <NodePropertyPanel
-          node={effectiveTNodes.find((n) => selectedNodeIds.has(n.id))!}
-          onChangePosition={(id, center) => {
-            commitEdit((current) => addMovePoly(current, id, center));
-          }}
-        />
-      )}
+          {selectedObjectIds.size === 1 &&
+            effectiveTObjects.some((o) => selectedObjectIds.has(o.id)) &&
+            (() => {
+              const object = effectiveTObjects.find((o) =>
+                selectedObjectIds.has(o.id),
+              )!;
+              const linkedNode =
+                object.fatherPolyId >= 0
+                  ? effectiveNodeMap.get(object.fatherPolyId)
+                  : undefined;
+              return (
+                <>
+                  <ObjectPropertyPanel
+                    object={object}
+                    existingIds={effectiveTObjects.map((o) => o.id)}
+                    onChangeId={(oldId, newId) => {
+                      commitEdit((current) =>
+                        addUpdateObjectId(current, oldId, newId),
+                      );
+                      setSelectedObjectIds(new Set([newId]));
+                    }}
+                    onChangeLabel={(id, label) => {
+                      commitEdit((current) =>
+                        addUpdateObjectLabel(current, id, label),
+                      );
+                    }}
+                    onChangePosition={(id, position) => {
+                      commitEdit((current) =>
+                        addUpdateObjectPosition(current, id, position),
+                      );
+                    }}
+                    onDelete={(id) => {
+                      commitEdit((current) => addDeleteObject(current, id));
+                      setSelectedObjectIds(new Set());
+                    }}
+                  />
+                  {linkedNode && (
+                    <NodePropertyPanel
+                      node={linkedNode}
+                      onChangePosition={(id, center) => {
+                        commitEdit((current) =>
+                          addMovePoly(current, id, center),
+                        );
+                      }}
+                    />
+                  )}
+                </>
+              );
+            })()}
 
-      {editMode === "edit" && selectedObjectIds.size === 1 &&
-        effectiveTObjects.some((o) => selectedObjectIds.has(o.id)) && (
-        <ObjectPropertyPanel
-          object={effectiveTObjects.find((o) => selectedObjectIds.has(o.id))!}
-          existingIds={effectiveTObjects.map((o) => o.id)}
-          onChangeId={(oldId, newId) => {
-            commitEdit((current) => addUpdateObjectId(current, oldId, newId));
-            setSelectedObjectIds(new Set([newId]));
-          }}
-          onChangeLabel={(id, label) => {
-            commitEdit((current) => addUpdateObjectLabel(current, id, label));
-          }}
-          onDelete={(id) => {
-            commitEdit((current) => addDeleteObject(current, id));
-            setSelectedObjectIds(new Set());
-          }}
-        />
+          {selectedObjectIds.size !== 1 && selectedNodeIds.size === 1 && (
+            <NodePropertyPanel
+              node={effectiveTNodes.find((n) => selectedNodeIds.has(n.id))!}
+              onChangePosition={(id, center) => {
+                commitEdit((current) => addMovePoly(current, id, center));
+              }}
+            />
+          )}
+          </div>
+
+          <AreaListPanel
+            areas={effectiveAreas}
+            selectedArea={selectedArea}
+            onSelect={(id) => setSelectedArea(id)}
+            onDelete={(id) => {
+              commitEdit((current) => addDeleteArea(current, id));
+              if (id === selectedArea) setSelectedArea(null);
+            }}
+          />
+        </div>
       )}
 
       {editMode === "edit" && showAddPanel && (
@@ -1378,25 +1589,7 @@ export function App() {
       )}
 
       {editMode === "edit" && selectedNodeIds.size === 2 && (
-        <div
-          data-overlay
-          style={{
-            position: "absolute",
-            bottom: 16,
-            left: "50%",
-            transform: "translateX(-50%)",
-            zIndex: 20,
-            display: "flex",
-            alignItems: "center",
-            gap: 10,
-            padding: "7px 10px",
-            borderRadius: 6,
-            background: "rgba(0,0,0,0.82)",
-            color: "#ddd",
-            fontFamily: "monospace",
-            fontSize: 12,
-          }}
-        >
+        <div data-overlay style={HINT_BAR}>
           <span>2 nodes selected</span>
           <button type="button" onClick={handleConnectSelected}>
             Connect (E)
@@ -1405,29 +1598,60 @@ export function App() {
       )}
 
       {editMode === "edit" && selectedObjectIds.size === 1 && selectedNodeIds.size === 1 && (
-        <div
-          data-overlay
-          style={{
-            position: "absolute",
-            bottom: 16,
-            left: "50%",
-            transform: "translateX(-50%)",
-            zIndex: 20,
-            display: "flex",
-            alignItems: "center",
-            gap: 10,
-            padding: "7px 10px",
-            borderRadius: 6,
-            background: "rgba(0,0,0,0.82)",
-            color: "#ddd",
-            fontFamily: "monospace",
-            fontSize: 12,
-          }}
-        >
+        <div data-overlay style={HINT_BAR}>
           <span>Object + Node selected</span>
           <button type="button" onClick={handleConnectObjectToNode}>
             Connect (C)
           </button>
+        </div>
+      )}
+
+      {editMode === "edit" && showShortcuts && (
+        <div
+          data-overlay
+          style={{
+            ...FLOATING_OVERLAY,
+            top: 54,
+            right: 16,
+            zIndex: 10,
+            borderRadius: 8,
+            padding: "14px 18px",
+            fontSize: 14,
+            maxWidth: 360,
+            pointerEvents: "none",
+          }}
+        >
+          <div
+            style={{
+              color: "#fff",
+              fontWeight: 600,
+              marginBottom: 8,
+              fontSize: 16,
+            }}
+          >
+            Shortcuts
+          </div>
+          <div
+            style={{
+              display: "flex",
+              flexDirection: "column",
+              gap: 6,
+              lineHeight: 1.3,
+            }}
+          >
+            <span style={{ whiteSpace: "nowrap" }}>
+              <b style={{ color: "#fff" }}>Del / Backspace</b> — 删除选中项
+            </span>
+            <span style={{ whiteSpace: "nowrap" }}>
+              <b style={{ color: "#fff" }}>E</b> — 连接两个 node 生成 edge
+            </span>
+            <span style={{ whiteSpace: "nowrap" }}>
+              <b style={{ color: "#fff" }}>C</b> — 连接 object 与 node
+            </span>
+            <span style={{ whiteSpace: "nowrap" }}>
+              <b style={{ color: "#fff" }}>Esc</b> — 清空选中
+            </span>
+          </div>
         </div>
       )}
 
@@ -1438,26 +1662,23 @@ export function App() {
             <div
               data-overlay
               style={{
-              position: "absolute",
-              top: 54,
-              right: 16,
-              zIndex: 10,
-              background: "rgba(0,0,0,0.82)",
-              borderRadius: 8,
-              padding: "12px 16px",
-              color: "#ccc",
-              fontFamily: "monospace",
-              fontSize: 12,
-              minWidth: 200,
-              userSelect: "none",
+                ...FLOATING_OVERLAY,
+                top: 54,
+                left: 16,
+                zIndex: 10,
+                borderRadius: 8,
+                padding: "16px 20px",
+                fontSize: 14,
+                minWidth: 260,
+                userSelect: "none",
               }}
             >
             <div
               style={{
                 color: "#fff",
                 fontWeight: 600,
-                marginBottom: 8,
-                fontSize: 13,
+                marginBottom: 10,
+                fontSize: 16,
               }}
             >
               Layers
@@ -1483,7 +1704,7 @@ export function App() {
             />
 
             <div style={{ margin: "6px 0 4px", borderTop: "1px solid #333" }} />
-            <div style={{ fontSize: 10, color: "#888", marginBottom: 2 }}>
+            <div style={{ fontSize: 12, color: "#888", marginBottom: 2 }}>
               Polyhedra
             </div>
             <Toggle
@@ -1520,14 +1741,14 @@ export function App() {
                     height: 4,
                   }}
                 />
-                <span style={{ fontSize: 10, color: "#888" }}>
+                <span style={{ fontSize: 12, color: "#888" }}>
                   {Math.round(meshOpacity * 100)}%
                 </span>
               </div>
             )}
 
             <div style={{ margin: "6px 0 4px", borderTop: "1px solid #333" }} />
-            <div style={{ fontSize: 10, color: "#888", marginBottom: 2 }}>
+            <div style={{ fontSize: 12, color: "#888", marginBottom: 2 }}>
               Topology Graph
             </div>
             <Toggle
@@ -1551,7 +1772,7 @@ export function App() {
 
             {/* PCD point-cloud selector */}
             <div style={{ margin: "6px 0 4px", borderTop: "1px solid #333" }} />
-            <div style={{ fontSize: 10, color: "#888", marginBottom: 4 }}>
+            <div style={{ fontSize: 12, color: "#888", marginBottom: 4 }}>
               Point Cloud
             </div>
             <select
@@ -1568,7 +1789,7 @@ export function App() {
                 borderRadius: 4,
                 padding: "3px 4px",
                 fontFamily: "monospace",
-                fontSize: 11,
+                fontSize: 13,
               }}
             >
               <option value="">None</option>
@@ -1591,13 +1812,13 @@ export function App() {
               </optgroup>
             </select>
             {pcdLoading && (
-              <div style={{ fontSize: 10, color: "#888", marginTop: 3 }}>
+              <div style={{ fontSize: 12, color: "#888", marginTop: 3 }}>
                 Loading...
               </div>
             )}
             {pcdLayers.length > 0 && !pcdLoading && (
               <>
-                <div style={{ fontSize: 10, color: "#888", marginTop: 3 }}>
+                <div style={{ fontSize: 12, color: "#888", marginTop: 3 }}>
                   {pcdLayers.reduce((s, l) => s + l.positions.length / 3, 0)} points
                 </div>
                 <input
@@ -1624,7 +1845,7 @@ export function App() {
                   borderRadius: 4,
                   padding: "2px 4px",
                   fontFamily: "monospace",
-                  fontSize: 10,
+                  fontSize: 12,
                 }}
               >
                 {Object.entries(SCHEME_LABELS).map(([k, v]) => (
@@ -1635,7 +1856,7 @@ export function App() {
 
             {/* Display tweaks */}
             <div style={{ margin: "6px 0 4px", borderTop: "1px solid #333" }} />
-            <div style={{ fontSize: 10, color: "#888", marginBottom: 4 }}>
+            <div style={{ fontSize: 12, color: "#888", marginBottom: 4 }}>
               Selection Filter
             </div>
             <SelectToggle label="Nodes" kind="node" selectableKinds={selectableKinds} toggle={toggleSelectable} />
@@ -1643,7 +1864,7 @@ export function App() {
             <SelectToggle label="Objects" kind="object" selectableKinds={selectableKinds} toggle={toggleSelectable} />
 
             <div style={{ margin: "6px 0 4px", borderTop: "1px solid #333" }} />
-            <div style={{ fontSize: 10, color: "#888", marginBottom: 4 }}>
+            <div style={{ fontSize: 12, color: "#888", marginBottom: 4 }}>
               Display
             </div>
             <Slider label="Node size" value={nodeSize} min={0.02} max={0.50} step={0.01} onChange={setNodeSize} />
@@ -1654,102 +1875,36 @@ export function App() {
             </div>
           )}
 
-          {/* Area list */}
-          <div
-            data-overlay
-            style={{
-              position: "absolute",
-              bottom: 16,
-              left: 16,
-              zIndex: 10,
-              background: "rgba(0,0,0,0.75)",
-              borderRadius: 8,
-              padding: "10px 14px",
-              color: "#ccc",
-              fontFamily: "monospace",
-              fontSize: 12,
-              maxHeight: "40vh",
-              overflowY: "auto",
-              minWidth: 170,
-            }}
-          >
+          {/* Stats (non-edit only; edit mode shows shortcut help instead) */}
+          {editMode !== "edit" && (
             <div
               style={{
-                color: "#fff",
-                fontWeight: 600,
-                marginBottom: 6,
-                fontSize: 13,
+                position: "absolute",
+                bottom: 16,
+                right: 16,
+                zIndex: 10,
+                background: "rgba(0,0,0,0.6)",
+                borderRadius: 6,
+                padding: "6px 12px",
+                color: "#888",
+                fontFamily: "monospace",
+                fontSize: 11,
               }}
             >
-              Areas ({data.areas.length})
+              Polys: {effectivePolys.length} &middot; Nodes:{" "}
+              {effectiveTNodes.length} &middot; TopoEdges:{" "}
+              {effectiveTEdges.length}
             </div>
-            {data.areas.map((a) => (
-              <div
-                key={a.id}
-                onClick={() =>
-                  setSelectedArea(a.id === selectedArea ? null : a.id)
-                }
-                style={{
-                  display: "flex",
-                  alignItems: "center",
-                  gap: 8,
-                  padding: "2px 4px",
-                  cursor: "pointer",
-                  borderRadius: 4,
-                  background:
-                    a.id === selectedArea
-                      ? "rgba(255,255,255,0.1)"
-                      : "transparent",
-                }}
-              >
-                <span
-                  style={{
-                    width: 10,
-                    height: 10,
-                    borderRadius: 2,
-                    flexShrink: 0,
-                    backgroundColor: a.colorHex,
-                    border: "1px solid rgba(255,255,255,0.15)",
-                  }}
-                />
-                <span>{a.roomLabel || `A${a.id}`}</span>
-                <span
-                  style={{ color: "#666", marginLeft: "auto", fontSize: 10 }}
-                >
-                  {a.polyIds.length}p
-                </span>
-              </div>
-            ))}
-          </div>
-
-          {/* Stats */}
-          <div
-            style={{
-              position: "absolute",
-              bottom: 16,
-              right: 16,
-              zIndex: 10,
-              background: "rgba(0,0,0,0.6)",
-              borderRadius: 6,
-              padding: "6px 12px",
-              color: "#888",
-              fontFamily: "monospace",
-              fontSize: 11,
-            }}
-          >
-            Polys: {effectiveTNodes.length} &middot; Nodes:{" "}
-            {effectiveTNodes.length} &middot; TopoEdges:{" "}
-            {effectiveTEdges.length}
-          </div>
+          )}
         </>
       )}
 
       {data ? (
         <Scene
-          data={data}
           effectiveNodes={effectiveTNodes}
           effectiveEdges={effectiveTEdges}
           effectivePolys={effectivePolys}
+          effectiveAreas={effectiveAreas}
           effectiveObjects={effectiveTObjects}
           layers={renderedLayers}
           selectedArea={selectedArea}
@@ -1795,6 +1950,126 @@ export function App() {
   );
 }
 
+// ---- Area list (edit mode, left column) ----
+
+function AreaListPanel({
+  areas,
+  selectedArea,
+  onSelect,
+  onDelete,
+}: {
+  areas: PreprocessedArea[];
+  selectedArea: number | null;
+  onSelect: (id: number | null) => void;
+  onDelete: (id: number) => void;
+}) {
+  const [collapsed, setCollapsed] = useState(false);
+
+  return (
+    <div
+      data-overlay
+      style={{
+        ...DARK_PANEL,
+        borderRadius: 8,
+        padding: "12px 16px",
+        fontSize: 14,
+        minWidth: 240,
+        maxHeight: "calc(100vh - 90px)",
+        overflowY: "auto",
+        flexShrink: 0,
+      }}
+    >
+      <div
+        style={{
+          display: "flex",
+          alignItems: "center",
+          gap: 8,
+          marginBottom: 8,
+        }}
+      >
+        <button
+          type="button"
+          onClick={() => setCollapsed((c) => !c)}
+          style={{
+            background: "transparent",
+            border: "none",
+            color: "#888",
+            cursor: "pointer",
+            fontFamily: "monospace",
+            fontSize: 13,
+            padding: 0,
+            width: 16,
+          }}
+          title={collapsed ? "Expand" : "Collapse"}
+        >
+          {collapsed ? "▸" : "▾"}
+        </button>
+        <span style={{ color: "#fff", fontWeight: 600, fontSize: 15 }}>
+          Areas ({areas.length})
+        </span>
+      </div>
+      {!collapsed && (
+        <>
+          {areas.length === 0 && (
+            <div style={{ color: "#666", fontSize: 12 }}>No areas</div>
+          )}
+          {areas.map((a) => (
+            <div
+              key={a.id}
+              onClick={() => onSelect(a.id === selectedArea ? null : a.id)}
+              style={{
+                display: "flex",
+                alignItems: "center",
+                gap: 10,
+                padding: "4px 6px",
+                cursor: "pointer",
+                borderRadius: 4,
+                background:
+                  a.id === selectedArea ? "rgba(255,255,255,0.1)" : "transparent",
+              }}
+            >
+              <span
+                style={{
+                  width: 14,
+                  height: 14,
+                  borderRadius: 3,
+                  flexShrink: 0,
+                  backgroundColor: a.colorHex,
+                  border: "1px solid rgba(255,255,255,0.15)",
+                }}
+              />
+              <span style={{ fontSize: 14 }}>{a.roomLabel || `A${a.id}`}</span>
+              <span style={{ color: "#666", marginLeft: "auto", fontSize: 12 }}>
+                {a.polyIds.length}p
+              </span>
+              <button
+                type="button"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  onDelete(a.id);
+                }}
+                style={{
+                  background: "rgba(180,60,60,0.15)",
+                  border: "1px solid rgba(220,80,80,0.5)",
+                  borderRadius: 4,
+                  color: "#e57373",
+                  cursor: "pointer",
+                  fontSize: 12,
+                  padding: "2px 8px",
+                  fontFamily: "monospace",
+                }}
+                title={`Delete Area ${a.id} metadata only (keeps its Polys and Objects)`}
+              >
+                Delete
+              </button>
+            </div>
+          ))}
+        </>
+      )}
+    </div>
+  );
+}
+
 // ---- Toggle & ErrorBanner ----
 
 function Slider({
@@ -1814,7 +2089,7 @@ function Slider({
 }) {
   return (
     <div style={{ marginTop: 2 }}>
-      <div style={{ display: "flex", justifyContent: "space-between", fontSize: 10, color: "#888" }}>
+      <div style={{ display: "flex", justifyContent: "space-between", fontSize: 12, color: "#888" }}>
         <span>{label}</span>
         <span>{value.toFixed(2)}</span>
       </div>
@@ -1850,7 +2125,7 @@ function SelectToggle({
         gap: 8,
         padding: "2px 0",
         cursor: "pointer",
-        fontSize: 11,
+        fontSize: 13,
       }}
     >
       <input

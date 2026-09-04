@@ -56,8 +56,8 @@ export function TopologicalNodes({
 
   if (!visible) return null;
 
-  const selRadius = nodeSize * 1.6;
-  const hovRadius = nodeSize * 1.35;
+  const selRadius = nodeSize * 1.35;
+  const hovRadius = nodeSize * 1.15;
 
   return (
     <>

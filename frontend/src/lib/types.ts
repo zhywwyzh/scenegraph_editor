@@ -108,6 +108,11 @@ export interface UpdateObjectFatherPoly {
   fatherPolyId: number;
 }
 
+export interface UpdateObjectPosition {
+  id: number;
+  position: [number, number, number];
+}
+
 export interface UpdateObjectId {
   oldId: number;
   newId: number;
@@ -115,15 +120,17 @@ export interface UpdateObjectId {
 
 export interface Mutations {
   deletePolyIds: number[];
+  deleteAreaIds: number[];
   movePoly: MovePoly[];
   removeEdges: EdgeRef[];
   addEdges: EdgeRef[];
   createPoly: CreatePoly[];
   updateObjectLabels: UpdateObjectLabel[];
   updateObjectFatherPolys: UpdateObjectFatherPoly[];
+  updateObjectPositions: UpdateObjectPosition[];
   updateObjectIds: UpdateObjectId[];
   deleteObjectIds: number[];
-  /** Desired order of object ids (original ids) for export */
+  /** Desired order of effective/current object ids for export */
   objectOrder: number[];
 }
 

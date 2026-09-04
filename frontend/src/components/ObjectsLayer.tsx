@@ -102,7 +102,7 @@ export function ObjectsLayer({
       {/* Selected object highlights */}
       {selectedObjects.map((o) => (
         <mesh key={`obj-sel-${o.id}`} position={o.position}>
-          <sphereGeometry args={[objectSize * 1.6, 16, 10]} />
+          <sphereGeometry args={[objectSize * 1.35, 16, 10]} />
           <meshBasicMaterial color="#ffaa00" transparent opacity={0.9} depthTest />
         </mesh>
       ))}
@@ -110,7 +110,7 @@ export function ObjectsLayer({
       {/* Hovered object highlight */}
       {hoveredObject && (
         <mesh position={hoveredObject.position}>
-          <sphereGeometry args={[objectSize * 1.4, 16, 10]} />
+          <sphereGeometry args={[objectSize * 1.15, 16, 10]} />
           <meshBasicMaterial
             color="#00e5ff"
             transparent

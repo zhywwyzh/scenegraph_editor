@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback, useRef } from "react";
 import type { SceneObject } from "../lib/types";
 
 interface Props {
@@ -7,28 +7,36 @@ interface Props {
   existingIds: number[];
   onChangeId: (oldId: number, newId: number) => void;
   onChangeLabel: (id: number, label: string) => void;
+  onChangePosition: (id: number, position: [number, number, number]) => void;
   onDelete: (id: number) => void;
 }
 
 /**
  * Property panel shown when exactly one scene object is selected in edit mode.
- * Allows editing the object's id and label.
+ * Allows editing the object's id, label, and X/Y/Z position.
  */
 export function ObjectPropertyPanel({
   object,
   existingIds,
   onChangeId,
   onChangeLabel,
+  onChangePosition,
   onDelete,
 }: Props) {
   const [localLabel, setLocalLabel] = useState(object.label);
   const [localId, setLocalId] = useState(String(object.id));
+  const [localX, setLocalX] = useState(object.position[0]);
+  const [localY, setLocalY] = useState(object.position[1]);
+  const [localZ, setLocalZ] = useState(object.position[2]);
 
   // Reset when selected object changes
   useEffect(() => {
     setLocalLabel(object.label);
     setLocalId(String(object.id));
-  }, [object.id, object.label]);
+    setLocalX(object.position[0]);
+    setLocalY(object.position[1]);
+    setLocalZ(object.position[2]);
+  }, [object.id, object.label, object.position[0], object.position[1], object.position[2]]);
 
   // id is a uint16 in the flight instruction contract (target_obj_id)
   const parsedId = Number(localId);
@@ -61,9 +69,31 @@ export function ObjectPropertyPanel({
     }
   }, [localLabel, object.id, object.label, onChangeLabel]);
 
+  // Enter commits and then blurs; the resulting blur must not commit a second
+  // time (otherwise it produces two identical history entries).
+  const labelCommittedRef = useRef(false);
+  const handleLabelBlur = useCallback(() => {
+    if (labelCommittedRef.current) {
+      labelCommittedRef.current = false;
+      return;
+    }
+    handleApply();
+  }, [handleApply]);
+
+  const commitAxis = useCallback(
+    (axis: "x" | "y" | "z", value: number) => {
+      const position: [number, number, number] = [...object.position];
+      const idx = axis === "x" ? 0 : axis === "y" ? 1 : 2;
+      position[idx] = value;
+      onChangePosition(object.id, position);
+    },
+    [object.id, object.position, onChangePosition],
+  );
+
   const handleInputKeyDown = useCallback(
     (e: React.KeyboardEvent<HTMLInputElement>) => {
       if (e.key === "Enter") {
+        labelCommittedRef.current = true;
         handleApply();
         (e.target as HTMLInputElement).blur();
       }
@@ -79,17 +109,13 @@ export function ObjectPropertyPanel({
     <div
       data-overlay
       style={{
-        position: "absolute",
-        top: 54,
-        right: 16,
-        zIndex: 10,
         background: "rgba(0,0,0,0.82)",
         borderRadius: 8,
-        padding: "12px 16px",
+        padding: "14px 18px",
         color: "#ccc",
         fontFamily: "monospace",
-        fontSize: 12,
-        minWidth: 210,
+        fontSize: 14,
+        minWidth: 0,
         userSelect: "none",
       }}
     >
@@ -98,7 +124,7 @@ export function ObjectPropertyPanel({
           color: "#fff",
           fontWeight: 600,
           marginBottom: 10,
-          fontSize: 13,
+          fontSize: 15,
         }}
       >
         Object Properties
@@ -110,13 +136,18 @@ export function ObjectPropertyPanel({
         label="Father Poly"
         value={object.fatherPolyId >= 0 ? String(object.fatherPolyId) : "—"}
       />
-      <Row
-        label="Position"
-        value={object.position.map((v) => v.toFixed(2)).join(", ")}
-      />
+
+      {/* Position editing */}
+      <div style={{ margin: "8px 0 6px", borderTop: "1px solid #333" }} />
+      <div style={{ fontSize: 12, color: "#888", marginBottom: 4 }}>
+        Position
+      </div>
+      <AxisInput axis="x" value={localX} setValue={setLocalX} commit={commitAxis} />
+      <AxisInput axis="y" value={localY} setValue={setLocalY} commit={commitAxis} />
+      <AxisInput axis="z" value={localZ} setValue={setLocalZ} commit={commitAxis} />
 
       {/* ID editing */}
-      <div style={{ fontSize: 10, color: "#888", margin: "6px 0 4px" }}>
+      <div style={{ fontSize: 12, color: "#888", margin: "6px 0 4px" }}>
         ID {localId !== String(object.id) && (
           <span style={{ color: idValid ? "#2ecc71" : "#e55" }}>
             {idValid ? "✓" : "invalid (duplicate / out of 0–65535)"}
@@ -135,9 +166,9 @@ export function ObjectPropertyPanel({
             color: "#eee",
             border: "1px solid #3498db",
             borderRadius: 4,
-            padding: "3px 6px",
+            padding: "5px 8px",
             fontFamily: "monospace",
-            fontSize: 12,
+            fontSize: 14,
           }}
         />
         <button
@@ -149,11 +180,11 @@ export function ObjectPropertyPanel({
             border: "1px solid rgba(52,152,219,0.5)",
             borderRadius: 4,
             color: "#3498db",
-            padding: "3px 8px",
+            padding: "5px 10px",
             cursor: idValid ? "pointer" : "not-allowed",
             opacity: idValid ? 1 : 0.4,
             fontFamily: "monospace",
-            fontSize: 11,
+            fontSize: 13,
             whiteSpace: "nowrap",
           }}
         >
@@ -164,7 +195,7 @@ export function ObjectPropertyPanel({
       <div style={{ margin: "8px 0 6px", borderTop: "1px solid #333" }} />
 
       {/* Label editing */}
-      <div style={{ fontSize: 10, color: "#888", marginBottom: 6 }}>
+      <div style={{ fontSize: 12, color: "#888", marginBottom: 6 }}>
         Label
       </div>
       <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
@@ -172,7 +203,7 @@ export function ObjectPropertyPanel({
           type="text"
           value={localLabel}
           onChange={(e) => setLocalLabel(e.target.value)}
-          onBlur={handleApply}
+          onBlur={handleLabelBlur}
           onKeyDown={handleInputKeyDown}
           style={{
             flex: 1,
@@ -180,9 +211,9 @@ export function ObjectPropertyPanel({
             color: "#eee",
             border: "1px solid #3498db",
             borderRadius: 4,
-            padding: "3px 6px",
+            padding: "5px 8px",
             fontFamily: "monospace",
-            fontSize: 12,
+            fontSize: 14,
           }}
         />
         <button
@@ -193,10 +224,10 @@ export function ObjectPropertyPanel({
             border: "1px solid rgba(52,152,219,0.5)",
             borderRadius: 4,
             color: "#3498db",
-            padding: "3px 8px",
+            padding: "5px 10px",
             cursor: "pointer",
             fontFamily: "monospace",
-            fontSize: 11,
+            fontSize: 13,
             whiteSpace: "nowrap",
           }}
         >
@@ -216,10 +247,10 @@ export function ObjectPropertyPanel({
           border: "1px solid rgba(200,50,50,0.4)",
           borderRadius: 4,
           color: "#e55",
-          padding: "4px 10px",
+          padding: "6px 12px",
           cursor: "pointer",
           fontFamily: "monospace",
-          fontSize: 11,
+          fontSize: 13,
         }}
       >
         Delete Object
@@ -247,14 +278,111 @@ function Row({
       <span
         style={{
           display: "inline-block",
-          width: 68,
+          width: 76,
           color: "#aaa",
-          fontSize: 11,
+          fontSize: 13,
         }}
       >
         {label}
       </span>
       <span style={{ color: "#ddd" }}>{value}</span>
+    </div>
+  );
+}
+
+function AxisInput({
+  axis,
+  value,
+  setValue,
+  commit,
+}: {
+  axis: "x" | "y" | "z";
+  value: number;
+  setValue: (v: number) => void;
+  commit: (axis: "x" | "y" | "z", value: number) => void;
+}) {
+  const [draft, setDraft] = useState(String(value));
+  const committedRef = useRef(false);
+  useEffect(() => {
+    setDraft(String(value));
+  }, [value]);
+
+  const handleChange = useCallback(
+    (e: React.ChangeEvent<HTMLInputElement>) => {
+      setDraft(e.target.value);
+    },
+    [],
+  );
+
+  const commitFromDraft = useCallback(() => {
+    const v = Number(draft);
+    if (!Number.isFinite(v)) {
+      setDraft(String(value));
+      return;
+    }
+    setValue(v);
+    commit(axis, v);
+  }, [draft, value, axis, setValue, commit]);
+
+  const handleBlur = useCallback(() => {
+    if (committedRef.current) {
+      committedRef.current = false;
+      return;
+    }
+    commitFromDraft();
+  }, [commitFromDraft]);
+
+  const handleKeyDown = useCallback(
+    (e: React.KeyboardEvent<HTMLInputElement>) => {
+      if (e.key === "Enter") {
+        committedRef.current = true;
+        commitFromDraft();
+        (e.target as HTMLInputElement).blur();
+      }
+    },
+    [commitFromDraft],
+  );
+
+  return (
+    <div
+      style={{
+        display: "flex",
+        alignItems: "center",
+        gap: 6,
+        marginTop: 3,
+      }}
+    >
+      <span
+        style={{
+          display: "inline-block",
+          width: 16,
+          color: "#3498db",
+          fontWeight: 600,
+          fontSize: 13,
+          textTransform: "uppercase",
+        }}
+      >
+        {axis}
+      </span>
+      <input
+        type="number"
+        step={0.1}
+        value={draft}
+        onChange={handleChange}
+        onBlur={handleBlur}
+        onKeyDown={handleKeyDown}
+        style={{
+          flex: 1,
+          background: "#1a1a2e",
+          color: "#eee",
+          border: "1px solid #3498db",
+          borderRadius: 4,
+          padding: "5px 8px",
+          fontFamily: "monospace",
+          fontSize: 14,
+          textAlign: "right",
+        }}
+      />
     </div>
   );
 }

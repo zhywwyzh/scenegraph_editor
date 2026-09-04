@@ -20,60 +20,19 @@ import {
   appendFileSync,
   rmSync,
 } from "node:fs";
-import { readdir, copyFile, mkdir } from "node:fs/promises";
+import { copyFile, mkdir } from "node:fs/promises";
 import { join, dirname } from "node:path";
-
-// ---- types (mirror frontend/src/lib/types.ts) ----
-
-interface MovePoly {
-  id: number;
-  center: [number, number, number];
-}
-
-interface EdgeRef {
-  srcId: number;
-  dstId: number;
-}
-
-interface CreatePoly {
-  areaId: number;
-  center: [number, number, number];
-  size: number;
-}
-
-interface UpdateObjectLabel {
-  id: number;
-  label: string;
-}
-
-interface UpdateObjectFatherPoly {
-  objectId: number;
-  fatherPolyId: number;
-}
-
-interface UpdateObjectId {
-  oldId: number;
-  newId: number;
-}
-
-interface Mutations {
-  deletePolyIds: number[];
-  movePoly: MovePoly[];
-  removeEdges: EdgeRef[];
-  addEdges: EdgeRef[];
-  createPoly: CreatePoly[];
-  updateObjectLabels: UpdateObjectLabel[];
-  updateObjectFatherPolys: UpdateObjectFatherPoly[];
-  updateObjectIds: UpdateObjectId[];
-  deleteObjectIds: number[];
-  objectOrder: number[];
-}
-
-interface ExportRequest {
-  snapshot: string;
-  mutations: Mutations;
-  base?: "saved" | "exported";
-}
+import type {
+  MovePoly,
+  EdgeRef,
+  CreatePoly,
+  UpdateObjectLabel,
+  UpdateObjectFatherPoly,
+  UpdateObjectPosition,
+  UpdateObjectId,
+  Mutations,
+  ExportRequest,
+} from "../frontend/src/lib/types";
 
 type V3 = [number, number, number];
 
@@ -88,10 +47,59 @@ function writeJson(path: string, data: any): void {
   writeFileSync(path, JSON.stringify(data, null, 2) + "\n");
 }
 
+/**
+ * A snapshot name is a single directory component (no separators, no "..").
+ * Snapshot names flow directly into path joins, so we must reject anything
+ * that could escape scene_graph_saved/ or scene_graph_exported/.
+ */
+function isValidSnapshotName(name: unknown): name is string {
+  return (
+    typeof name === "string" &&
+    name.length > 0 &&
+    !name.includes("..") &&
+    !name.includes("/") &&
+    !name.includes("\\")
+  );
+}
+
+/**
+ * Compute an outward-facing unit normal and plane equation constant `d`
+ * from three non-collinear points. plane_equation = [nx, ny, nz, d] with
+ * d = -(n · p0).
+ */
+function computePlane(
+  p0: V3,
+  p1: V3,
+  p2: V3,
+): { normal: V3; d: number } {
+  const ax = p1[0] - p0[0];
+  const ay = p1[1] - p0[1];
+  const az = p1[2] - p0[2];
+  const bx = p2[0] - p0[0];
+  const by = p2[1] - p0[1];
+  const bz = p2[2] - p0[2];
+
+  let nx = ay * bz - az * by;
+  let ny = az * bx - ax * bz;
+  let nz = ax * by - ay * bx;
+  const len = Math.hypot(nx, ny, nz);
+  if (len === 0) {
+    return { normal: [0, 0, 1], d: -p0[2] };
+  }
+  nx /= len;
+  ny /= len;
+  nz /= len;
+  return {
+    normal: [nx, ny, nz],
+    d: -(nx * p0[0] + ny * p0[1] + nz * p0[2]),
+  };
+}
+
 // ---- Mutation engine ----
 
 function applyMutations(root: any, mutations: Mutations): UpdateObjectId[] {
   applyDeletePolys(root, mutations.deletePolyIds);
+  applyDeleteAreas(root, mutations.deleteAreaIds);
   applyMovePolys(root, mutations.movePoly);
   applyRemoveEdges(root, mutations.removeEdges);
   applyAddEdges(root, mutations.addEdges);
@@ -101,6 +109,7 @@ function applyMutations(root: any, mutations: Mutations): UpdateObjectId[] {
   const appliedRenames = applyUpdateObjectIds(root, mutations.updateObjectIds);
   applyUpdateObjectLabels(root, mutations.updateObjectLabels);
   applyUpdateObjectFatherPolys(root, mutations.updateObjectFatherPolys);
+  applyUpdateObjectPositions(root, mutations.updateObjectPositions);
   applyDeleteObjects(root, mutations.deleteObjectIds);
   applyObjectOrder(root, mutations.objectOrder);
   rebuildCounters(root);
@@ -138,14 +147,35 @@ function applyDeletePolys(root: any, ids: number[]): void {
     }
   }
 
-  root.vertices = (root.vertices || []).filter(
-    (v: any) =>
-      !root.polyhedrons.some(
-        (p: any) =>
-          (p.white_vertex_ids || []).includes(v.id) ||
-          (p.black_vertex_ids || []).includes(v.id),
-      ) || true,
+  // Drop vertices that are no longer referenced by any remaining poly
+  // (white or black vertex lists). The previous `|| true` kept every
+  // vertex, leaving orphans behind after a poly delete.
+  root.vertices = (root.vertices || []).filter((v: any) =>
+    (root.polyhedrons || []).some(
+      (p: any) =>
+        (p.white_vertex_ids || []).includes(v.id) ||
+        (p.black_vertex_ids || []).includes(v.id),
+    ),
   );
+}
+
+/**
+ * Remove area metadata only: drop the area entries listed in `ids` and
+ * strip those ids from every remaining area's neighbor_area_ids. The poly
+ * set (and therefore area.poly_ids) is intentionally left untouched — the
+ * user only asked to delete the Area grouping, not the Polys/Objects inside.
+ */
+function applyDeleteAreas(root: any, ids: number[]): void {
+  if (!ids || ids.length === 0) return;
+  const idSet = new Set(ids.map(Number));
+  root.areas = (root.areas || []).filter(
+    (a: any) => !idSet.has(Number(a.id)),
+  );
+  for (const area of root.areas) {
+    area.neighbor_area_ids = (area.neighbor_area_ids || []).filter(
+      (nid: any) => !idSet.has(Number(nid)),
+    );
+  }
 }
 
 function applyMovePolys(root: any, moves: MovePoly[]): void {
@@ -196,8 +226,23 @@ function applyMovePolys(root: any, moves: MovePoly[]): void {
 
     for (const fid of poly.facet_ids || []) {
       const facet = (root.facets || []).find((f: any) => f.id === fid);
-      if (!facet || !facet.center) continue;
-      facet.center = [facet.center[0] + dx, facet.center[1] + dy, facet.center[2] + dz];
+      if (!facet) continue;
+      if (facet.center) {
+        facet.center = [facet.center[0] + dx, facet.center[1] + dy, facet.center[2] + dz];
+      }
+      // Recompute the plane equation / unit normal so they stay consistent
+      // with the translated vertex geometry.
+      const fvids = facet.vertex_ids || [];
+      if (fvids.length >= 3) {
+        const a = vertexMap.get(fvids[0]);
+        const b = vertexMap.get(fvids[1]);
+        const c = vertexMap.get(fvids[2]);
+        if (a?.position && b?.position && c?.position) {
+          const { normal, d } = computePlane(a.position, b.position, c.position);
+          facet.out_unit_normal = normal;
+          facet.plane_equation = [normal[0], normal[1], normal[2], d];
+        }
+      }
     }
   }
 }
@@ -329,12 +374,13 @@ function applyCreatePolys(root: any, creates: CreatePoly[]): void {
         (pts[0][2] + pts[1][2] + pts[2][2]) / 3,
       ];
       if (!root.facets) root.facets = [];
+      const { normal, d } = computePlane(pts[0], pts[1], pts[2]);
       root.facets.push({
         id: maxFacetId,
         vertex_ids: [...tri],
         center: fc,
-        out_unit_normal: [0, 0, 1],
-        plane_equation: [0, 0, 1, -fc[2]],
+        out_unit_normal: normal,
+        plane_equation: [normal[0], normal[1], normal[2], d],
         master_poly_id: polyId,
         neighbor_facet_ids: [],
         is_linked: false,
@@ -375,6 +421,29 @@ function applyCreatePolys(root: any, creates: CreatePoly[]): void {
     if (area) {
       if (!area.poly_ids) area.poly_ids = [];
       area.poly_ids.push(polyId);
+
+      const polyMin: V3 = [cx - s, cy - s, cz - s];
+      const polyMax: V3 = [cx + s, cy + s, cz + s];
+      if (!area.box_min || !area.box_max) {
+        area.box_min = [...polyMin];
+        area.box_max = [...polyMax];
+      } else {
+        area.box_min = [
+          Math.min(Number(area.box_min[0]), polyMin[0]),
+          Math.min(Number(area.box_min[1]), polyMin[1]),
+          Math.min(Number(area.box_min[2]), polyMin[2]),
+        ];
+        area.box_max = [
+          Math.max(Number(area.box_max[0]), polyMax[0]),
+          Math.max(Number(area.box_max[1]), polyMax[1]),
+          Math.max(Number(area.box_max[2]), polyMax[2]),
+        ];
+      }
+      area.center = [
+        (Number(area.box_min[0]) + Number(area.box_max[0])) / 2,
+        (Number(area.box_min[1]) + Number(area.box_max[1])) / 2,
+        (Number(area.box_min[2]) + Number(area.box_max[2])) / 2,
+      ];
     }
   }
 }
@@ -439,6 +508,18 @@ function applyUpdateObjectFatherPolys(root: any, updates: UpdateObjectFatherPoly
     if (!obj) continue;
     if (!obj.edge) obj.edge = {};
     obj.edge.father_poly_id = u.fatherPolyId;
+  }
+}
+
+function applyUpdateObjectPositions(root: any, updates: UpdateObjectPosition[]): void {
+  if (updates.length === 0) return;
+  const objMap = new Map<number, any>();
+  for (const o of root.objects || []) objMap.set(Number(o.id), o);
+
+  for (const u of updates) {
+    const obj = objMap.get(u.id);
+    if (!obj) continue;
+    obj.pos = [...u.position] as V3;
   }
 }
 
@@ -565,27 +646,60 @@ function rebuildCounters(root: any): void {
 // ---- file copy (mirror objects/ from saved to exported) ----
 
 /**
- * Copy objects/ PCD files from saved/ into exported/, but never overwrite
- * an existing file in exported/ — earlier exports may have renamed files
- * there (object_<oldId>_*.pcd → object_<newId>_*.pcd) and overwriting
- * from saved/ would clobber them on subsequent exports.
+ * Copy only the objects/ PCD files referenced by the final scene graph
+ * (rather than mirroring every saved/ file and pruning afterwards).
+ * `renames` maps new object ids back to their saved-side ids so we copy the
+ * original filenames that renameObjectFiles() then renames. Never overwrite
+ * an existing file in exported/ — earlier exports may already have renamed
+ * files there (object_<oldId>_*.pcd → object_<newId>_*.pcd).
  */
-async function copyObjectsDir(savedDir: string, exportedDir: string): Promise<void> {
+async function copyObjectsDir(
+  savedDir: string,
+  exportedDir: string,
+  root: any,
+  renames: UpdateObjectId[],
+): Promise<void> {
   const src = join(savedDir, "objects");
   const dst = join(exportedDir, "objects");
+
+  const oldIdByNewId = new Map<number, number>();
+  for (const r of renames) {
+    oldIdByNewId.set(Number(r.newId), Number(r.oldId));
+  }
+
+  const wanted = new Set<string>();
+  for (const o of root.objects || []) {
+    for (const key of ["cloud", "obb_axis", "obb_corners"]) {
+      const p = o?.files?.[key];
+      if (typeof p !== "string" || !p.includes("/")) continue;
+      const base = p.slice(p.lastIndexOf("/") + 1);
+      const m = base.match(/^object_(\d+)_(cloud|obb_axis|obb_corners)\.pcd$/);
+      if (!m) {
+        wanted.add(base);
+        continue;
+      }
+      const newId = Number(m[1]);
+      const oldId = oldIdByNewId.get(newId) ?? newId;
+      wanted.add(`object_${oldId}_${m[2]}.pcd`);
+    }
+  }
+
   try {
-    const entries = await readdir(src);
     await mkdir(dst, { recursive: true });
-    for (const f of entries) {
-      const dstFile = join(dst, f);
+  } catch {
+    // objects dir already exists — ok
+  }
+  for (const f of wanted) {
+    const dstFile = join(dst, f);
+    try {
+      statSync(dstFile);
+    } catch {
       try {
-        statSync(dstFile);
-      } catch {
         await copyFile(join(src, f), dstFile);
+      } catch {
+        // source file may not exist (e.g. chained rename) — skip
       }
     }
-  } catch {
-    // no objects dir — ok
   }
 }
 
@@ -665,11 +779,14 @@ function pruneUnreferencedObjects(exportedDir: string): number {
 }
 
 function findLatestSnapshot(baseDir: string): string {
-  const entries = readdirSync(baseDir, { withFileTypes: true }).filter(
-    (e) =>
-      e.isDirectory() &&
-      statSync(join(baseDir, e.name, "scene_graph.json")).isFile(),
-  );
+  const entries = readdirSync(baseDir, { withFileTypes: true }).filter((e) => {
+    if (!e.isDirectory()) return false;
+    try {
+      return statSync(join(baseDir, e.name, "scene_graph.json")).isFile();
+    } catch {
+      return false;
+    }
+  });
   entries.sort(
     (a, b) =>
       statSync(join(baseDir, b.name)).mtimeMs -
@@ -786,6 +903,10 @@ export function apiPlugin(): Plugin {
           try {
             const body = await readBody(req);
             const payload: ExportRequest = JSON.parse(body);
+            if (!isValidSnapshotName(payload.snapshot)) {
+              sendJson(res, 400, { success: false, error: "Invalid snapshot name" });
+              return;
+            }
             const t0 = Date.now();
             logToFile("export", "request", {
               snapshot: payload.snapshot,
@@ -836,7 +957,7 @@ export function apiPlugin(): Plugin {
             };
             writeJson(join(exportedDir, "manifest.json"), manifest);
 
-            await copyObjectsDir(savedDir, exportedDir);
+            await copyObjectsDir(savedDir, exportedDir, root, appliedRenames);
             renameObjectFiles(savedDir, exportedDir, appliedRenames);
             const pruned = pruneUnreferencedObjects(exportedDir);
 
@@ -916,6 +1037,10 @@ export function apiPlugin(): Plugin {
               sendJson(res, 400, { success: false, error: "Missing snapshot query param" });
               return;
             }
+            if (!isValidSnapshotName(snapshot)) {
+              sendJson(res, 400, { success: false, error: "Invalid snapshot name" });
+              return;
+            }
 
             const savedPath = join(PROJECT_ROOT, "scene_graph_saved", snapshot, "scene_graph.json");
             const exportedPath = join(PROJECT_ROOT, "scene_graph_exported", snapshot, "scene_graph.json");
@@ -968,7 +1093,7 @@ export function apiPlugin(): Plugin {
             } else {
               const snapshot = url.searchParams.get("snapshot");
               const relPath = url.searchParams.get("path");
-              if (!snapshot || !relPath || relPath.includes("..") || relPath.startsWith("/")) {
+              if (!snapshot || !isValidSnapshotName(snapshot) || !relPath || relPath.includes("..") || relPath.startsWith("/")) {
                 sendJson(res, 400, { success: false, error: "Missing/invalid snapshot or path" });
                 return;
               }

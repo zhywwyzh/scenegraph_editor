@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback, useRef } from "react";
 import type { TopologicalNode } from "../lib/types";
 
 interface Props {
@@ -24,8 +24,6 @@ export function NodePropertyPanel({ node, onChangePosition }: Props) {
     setLocalZ(node.position[2]);
   }, [node.id, node.position[0], node.position[1], node.position[2]]);
 
-  const localByAxis = { x: localX, y: localY, z: localZ };
-  const setLocalByAxis = { x: setLocalX, y: setLocalY, z: setLocalZ };
   const nodePos = node.position;
 
   // Commit a single-axis change to history
@@ -43,17 +41,13 @@ export function NodePropertyPanel({ node, onChangePosition }: Props) {
     <div
       data-overlay
       style={{
-        position: "absolute",
-        top: 54,
-        right: 16,
-        zIndex: 10,
         background: "rgba(0,0,0,0.82)",
         borderRadius: 8,
-        padding: "12px 16px",
+        padding: "14px 18px",
         color: "#ccc",
         fontFamily: "monospace",
-        fontSize: 12,
-        minWidth: 210,
+        fontSize: 14,
+        minWidth: 0,
         userSelect: "none",
       }}
     >
@@ -62,7 +56,7 @@ export function NodePropertyPanel({ node, onChangePosition }: Props) {
           color: "#fff",
           fontWeight: 600,
           marginBottom: 10,
-          fontSize: 13,
+          fontSize: 15,
         }}
       >
         Node Properties
@@ -74,7 +68,7 @@ export function NodePropertyPanel({ node, onChangePosition }: Props) {
 
       <div style={{ margin: "8px 0 6px", borderTop: "1px solid #333" }} />
 
-      <div style={{ fontSize: 10, color: "#888", marginBottom: 6 }}>
+      <div style={{ fontSize: 12, color: "#888", marginBottom: 6 }}>
         Position
       </div>
 
@@ -82,21 +76,18 @@ export function NodePropertyPanel({ node, onChangePosition }: Props) {
         axis="x"
         localValue={localX}
         setLocal={setLocalX}
-        nodePos={nodePos}
         commitAxis={commitAxis}
       />
       <AxisRow
         axis="y"
         localValue={localY}
         setLocal={setLocalY}
-        nodePos={nodePos}
         commitAxis={commitAxis}
       />
       <AxisRow
         axis="z"
         localValue={localZ}
         setLocal={setLocalZ}
-        nodePos={nodePos}
         commitAxis={commitAxis}
       />
 
@@ -110,48 +101,78 @@ function AxisRow({
   axis,
   localValue,
   setLocal,
-  nodePos,
   commitAxis,
 }: {
   axis: Axis;
   localValue: number;
   setLocal: (v: number) => void;
-  nodePos: [number, number, number];
   commitAxis: (axis: Axis, value: number) => void;
 }) {
-  const idx = axis === "x" ? 0 : axis === "y" ? 1 : 2;
+  // Draft string for the number input lets the user clear/type partial values
+  // without immediately collapsing "" → 0 or "e" → NaN into committed state.
+  const [draft, setDraft] = useState(String(localValue));
+  const draftRef = useRef(localValue);
+  const committedRef = useRef(false);
+  useEffect(() => {
+    setDraft(String(localValue));
+    draftRef.current = localValue;
+  }, [localValue]);
 
   // Commit on blur / Enter for number input
   const handleInputChange = useCallback(
     (e: React.ChangeEvent<HTMLInputElement>) => {
-      setLocal(Number(e.target.value));
+      setDraft(e.target.value);
     },
-    [setLocal],
+    [],
   );
 
+  const commitFromDraft = useCallback(() => {
+    const v = Number(draft);
+    if (!Number.isFinite(v)) {
+      setDraft(String(localValue));
+      return;
+    }
+    setLocal(v);
+    commitAxis(axis, v);
+  }, [draft, localValue, axis, setLocal, commitAxis]);
+
   const handleInputBlur = useCallback(() => {
-    commitAxis(axis, localValue);
-  }, [axis, localValue, commitAxis]);
+    if (committedRef.current) {
+      committedRef.current = false;
+      return;
+    }
+    commitFromDraft();
+  }, [commitFromDraft]);
 
   const handleInputKeyDown = useCallback(
     (e: React.KeyboardEvent<HTMLInputElement>) => {
       if (e.key === "Enter") {
-        commitAxis(axis, localValue);
+        committedRef.current = true;
+        commitFromDraft();
         (e.target as HTMLInputElement).blur();
       }
     },
-    [axis, localValue, commitAxis],
+    [commitFromDraft],
   );
 
-  // Slider: commit on every change for real-time 3D feedback
+  // Slider: update local preview on change, but only commit one history
+  // entry when the drag/keyboard interaction ends (pointerup / keyup).
   const handleSliderChange = useCallback(
     (e: React.ChangeEvent<HTMLInputElement>) => {
       const v = Number(e.target.value);
+      draftRef.current = v;
+      setDraft(String(v));
       setLocal(v);
-      commitAxis(axis, v);
     },
-    [axis, setLocal, commitAxis],
+    [setLocal],
   );
+
+  const commitSlider = useCallback(() => {
+    const v = draftRef.current;
+    if (Number.isFinite(v)) {
+      commitAxis(axis, v);
+    }
+  }, [axis, commitAxis]);
 
   const sliderMin = Math.min(localValue - 10, -100);
   const sliderMax = Math.max(localValue + 10, 100);
@@ -170,10 +191,10 @@ function AxisRow({
         <span
           style={{
             display: "inline-block",
-            width: 14,
+            width: 16,
             color: "#3498db",
             fontWeight: 600,
-            fontSize: 11,
+            fontSize: 13,
             textTransform: "uppercase",
           }}
         >
@@ -182,19 +203,19 @@ function AxisRow({
         <input
           type="number"
           step={0.1}
-          value={localValue}
+          value={draft}
           onChange={handleInputChange}
           onBlur={handleInputBlur}
           onKeyDown={handleInputKeyDown}
           style={{
-            width: 72,
+            width: 80,
             background: "#1a1a2e",
             color: "#eee",
             border: "1px solid #3498db",
             borderRadius: 4,
-            padding: "3px 6px",
+            padding: "5px 8px",
             fontFamily: "monospace",
-            fontSize: 12,
+            fontSize: 14,
             textAlign: "right",
           }}
         />
@@ -209,6 +230,8 @@ function AxisRow({
           step={0.05}
           value={localValue}
           onChange={handleSliderChange}
+          onPointerUp={commitSlider}
+          onKeyUp={commitSlider}
           style={{
             width: "100%",
             accentColor: "#3498db",
@@ -220,7 +243,7 @@ function AxisRow({
           style={{
             display: "flex",
             justifyContent: "space-between",
-            fontSize: 9,
+            fontSize: 11,
             color: "#555",
             marginTop: 1,
           }}
@@ -254,9 +277,9 @@ function Row({
       <span
         style={{
           display: "inline-block",
-          width: 42,
+          width: 50,
           color: "#aaa",
-          fontSize: 11,
+          fontSize: 13,
         }}
       >
         {label}
