@@ -16,6 +16,7 @@ interface Props {
   onChangeId: (oldId: number, newId: number) => void;
   onChangeLabel: (id: number, label: string) => void;
   onChangePosition: (id: number, position: [number, number, number]) => void;
+  onPreviewPosition: (id: number, position: [number, number, number]) => void;
   onColor: (id: number, color: [number, number, number]) => void;
   onDelete: (id: number) => void;
 }
@@ -30,6 +31,7 @@ export function ObjectPropertyPanel({
   onChangeId,
   onChangeLabel,
   onChangePosition,
+  onPreviewPosition,
   onColor,
   onDelete,
 }: Props) {
@@ -100,6 +102,16 @@ export function ObjectPropertyPanel({
       onChangePosition(object.id, position);
     },
     [object.id, object.position, onChangePosition],
+  );
+
+  const previewAxis = useCallback(
+    (axis: "x" | "y" | "z", value: number) => {
+      const position: [number, number, number] = [...object.position];
+      const idx = axis === "x" ? 0 : axis === "y" ? 1 : 2;
+      position[idx] = value;
+      onPreviewPosition(object.id, position);
+    },
+    [object.id, object.position, onPreviewPosition],
   );
 
   const handleInputKeyDown = useCallback(
@@ -184,9 +196,9 @@ export function ObjectPropertyPanel({
       <div style={{ fontSize: 11, color: "#888", marginBottom: 4 }}>
         Position
       </div>
-      <AxisRow axis="x" localValue={localX} setLocal={setLocalX} commitAxis={commitAxis} />
-      <AxisRow axis="y" localValue={localY} setLocal={setLocalY} commitAxis={commitAxis} />
-      <AxisRow axis="z" localValue={localZ} setLocal={setLocalZ} commitAxis={commitAxis} />
+      <AxisRow axis="x" localValue={localX} setLocal={setLocalX} commitAxis={commitAxis} previewAxis={previewAxis} />
+      <AxisRow axis="y" localValue={localY} setLocal={setLocalY} commitAxis={commitAxis} previewAxis={previewAxis} />
+      <AxisRow axis="z" localValue={localZ} setLocal={setLocalZ} commitAxis={commitAxis} previewAxis={previewAxis} />
 
       {/* ID editing */}
       <div style={{ fontSize: 11, color: "#888", margin: "4px 0 2px" }}>
@@ -338,33 +350,38 @@ function AxisRow({
   localValue,
   setLocal,
   commitAxis,
+  previewAxis,
 }: {
   axis: "x" | "y" | "z";
   localValue: number;
   setLocal: (v: number) => void;
   commitAxis: (axis: "x" | "y" | "z", value: number) => void;
+  previewAxis: (axis: "x" | "y" | "z", value: number) => void;
 }) {
   // Draft string for the number input lets the user clear/type partial values
   // without immediately collapsing "" → 0 or "e" → NaN into committed state.
-  const [draft, setDraft] = useState(localValue.toFixed(5));
-  const draftRef = useRef(localValue);
+  const [draft, setDraft] = useState(localValue.toFixed(2));
   const committedRef = useRef(false);
   useEffect(() => {
-    setDraft(localValue.toFixed(5));
-    draftRef.current = localValue;
+    setDraft(localValue.toFixed(2));
   }, [localValue]);
 
   const handleInputChange = useCallback(
     (e: React.ChangeEvent<HTMLInputElement>) => {
-      setDraft(e.target.value);
+      const raw = e.target.value;
+      setDraft(raw);
+      const v = Number(raw);
+      if (raw.trim() !== "" && Number.isFinite(v)) {
+        previewAxis(axis, v);
+      }
     },
-    [],
+    [axis, previewAxis],
   );
 
   const commitFromDraft = useCallback(() => {
-    const v = Number(Number(draft).toFixed(5));
+    const v = Number(Number(draft).toFixed(2));
     if (!Number.isFinite(v)) {
-      setDraft(localValue.toFixed(5));
+      setDraft(localValue.toFixed(2));
       return;
     }
     setLocal(v);
@@ -390,28 +407,6 @@ function AxisRow({
     [commitFromDraft],
   );
 
-  // Slider: update local preview on change, but only commit one history entry
-  // when the drag/keyboard interaction ends (pointerup / keyup).
-  const handleSliderChange = useCallback(
-    (e: React.ChangeEvent<HTMLInputElement>) => {
-      const v = Number(Number(e.target.value).toFixed(5));
-      draftRef.current = v;
-      setDraft(v.toFixed(5));
-      setLocal(v);
-    },
-    [setLocal],
-  );
-
-  const commitSlider = useCallback(() => {
-    const v = Number(draftRef.current.toFixed(5));
-    if (Number.isFinite(v)) {
-      commitAxis(axis, v);
-    }
-  }, [axis, commitAxis]);
-
-  const sliderMin = Math.min(localValue - 10, -100);
-  const sliderMax = Math.max(localValue + 10, 100);
-
   return (
     <div style={{ marginBottom: 2 }}>
       <div
@@ -436,7 +431,7 @@ function AxisRow({
         </span>
         <input
           type="number"
-          step={0.00001}
+          step={0.01}
           value={draft}
           onChange={handleInputChange}
           onBlur={handleInputBlur}
@@ -453,37 +448,6 @@ function AxisRow({
             textAlign: "right",
           }}
         />
-      </div>
-
-      <div style={{ marginTop: 2, paddingLeft: 0 }}>
-        <input
-          type="range"
-          min={sliderMin}
-          max={sliderMax}
-          step={0.00001}
-          value={localValue}
-          onChange={handleSliderChange}
-          onPointerUp={commitSlider}
-          onKeyUp={commitSlider}
-          style={{
-            width: "100%",
-            accentColor: "#3498db",
-            height: 4,
-            cursor: "pointer",
-          }}
-        />
-        <div
-          style={{
-            display: "flex",
-            justifyContent: "space-between",
-            fontSize: 10,
-            color: "#555",
-            marginTop: 1,
-          }}
-        >
-          <span>{sliderMin.toFixed(0)}</span>
-          <span>{sliderMax.toFixed(0)}</span>
-        </div>
       </div>
     </div>
   );

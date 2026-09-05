@@ -232,6 +232,45 @@ function effectiveNodes(
   return [...existing, ...created];
 }
 
+/** True when two XYZ positions are effectively equal (2-decimal editing). */
+function samePosition(
+  a: [number, number, number],
+  b: [number, number, number],
+): boolean {
+  const EPS = 1e-4;
+  return (
+    Math.abs(a[0] - b[0]) < EPS &&
+    Math.abs(a[1] - b[1]) < EPS &&
+    Math.abs(a[2] - b[2]) < EPS
+  );
+}
+
+/** Apply live (uncommitted) node-position previews on top of committed nodes. */
+function applyNodePreview(
+  nodes: TopologicalNode[],
+  preview: Map<number, [number, number, number]>,
+): TopologicalNode[] {
+  if (preview.size === 0) return nodes;
+  return nodes.map((n) => {
+    const p = preview.get(n.id);
+    if (!p) return n;
+    return { ...n, position: [p[0], p[1], p[2]] as [number, number, number] };
+  });
+}
+
+/** Apply live (uncommitted) object-position previews on top of committed objects. */
+function applyObjectPreview(
+  objects: SceneObject[],
+  preview: Map<number, [number, number, number]>,
+): SceneObject[] {
+  if (preview.size === 0) return objects;
+  return objects.map((o) => {
+    const p = preview.get(o.id);
+    if (!p) return o;
+    return { ...o, position: [p[0], p[1], p[2]] as [number, number, number] };
+  });
+}
+
 function effectiveEdges(
   allEdges: TopologicalEdge[],
   nodes: TopologicalNode[],
@@ -372,6 +411,8 @@ function ClickHandler({
   onSelectNode,
   onSelectEdge,
   onSelectObject,
+  onDoubleClickNode,
+  onDoubleClickObject,
   onDeselectAll,
   onHoverTarget,
   selectableKinds,
@@ -384,6 +425,8 @@ function ClickHandler({
   onSelectNode: (id: number, additive: boolean) => void;
   onSelectEdge: (key: string) => void;
   onSelectObject: (id: number, additive: boolean) => void;
+  onDoubleClickNode: (id: number) => void;
+  onDoubleClickObject: (id: number) => void;
   onDeselectAll: () => void;
   onHoverTarget: (target: PickTarget) => void;
   selectableKinds: Set<PickKind>;
@@ -502,16 +545,41 @@ function ClickHandler({
       onDeselectAll();
     };
 
+    const onDoubleClick = (e: MouseEvent) => {
+      const el = e.target as HTMLElement;
+      if (
+        el.closest("[data-overlay]") ||
+        el.tagName === "BUTTON" ||
+        el.tagName === "INPUT" ||
+        el.tagName === "LABEL"
+      )
+        return;
+
+      const target = targetAt(e);
+      if (target?.kind === "node") {
+        e.stopPropagation();
+        onDoubleClickNode(target.id);
+        return;
+      }
+      if (target?.kind === "object") {
+        e.stopPropagation();
+        onDoubleClickObject(target.id);
+        return;
+      }
+    };
+
     canvas.style.cursor = "";
     canvas.addEventListener("mousedown", onDown, { capture: true });
     canvas.addEventListener("pointermove", onMove, { capture: true });
     canvas.addEventListener("pointerleave", onLeave);
     canvas.addEventListener("click", onClick, { capture: true });
+    canvas.addEventListener("dblclick", onDoubleClick, { capture: true });
     return () => {
       canvas.removeEventListener("mousedown", onDown, { capture: true });
       canvas.removeEventListener("pointermove", onMove, { capture: true });
       canvas.removeEventListener("pointerleave", onLeave);
       canvas.removeEventListener("click", onClick, { capture: true });
+      canvas.removeEventListener("dblclick", onDoubleClick, { capture: true });
       if (rafId !== null) {
         cancelAnimationFrame(rafId);
         rafId = null;
@@ -531,6 +599,8 @@ function ClickHandler({
     onSelectNode,
     onSelectEdge,
     onSelectObject,
+    onDoubleClickNode,
+    onDoubleClickObject,
     onDeselectAll,
     onHoverTarget,
     selectableKinds,
@@ -548,19 +618,43 @@ function CameraFocusController({
   objects,
   nodeMap,
 }: {
-  focusRequest: { id: number; nonce: number } | null;
+  focusRequest: { id: number; nonce: number; kind: "object" | "node" } | null;
   sceneGroupRef: RefObject<THREE.Group | null>;
   controlsRef: RefObject<any>;
   objects: SceneObject[];
   nodeMap: Map<number, TopologicalNode>;
 }) {
   const camera = useThree((s) => s.camera);
+  const lastNonceRef = useRef<number | null>(null);
 
   useEffect(() => {
     if (!focusRequest) return;
+    if (lastNonceRef.current === focusRequest.nonce) return;
+    lastNonceRef.current = focusRequest.nonce;
+
     const sceneGroup = sceneGroupRef.current;
     const controls = controlsRef.current;
     if (!sceneGroup || !controls) return;
+
+    if (focusRequest.kind === "node") {
+      const node = nodeMap.get(focusRequest.id);
+      if (!node) return;
+
+      sceneGroup.updateWorldMatrix(true, false);
+      const nodeWorld = sceneGroup.localToWorld(
+        new THREE.Vector3(
+          node.position[0],
+          node.position[1],
+          node.position[2],
+        ),
+      );
+      const cameraOffset = camera.position.clone().sub(controls.target);
+      controls.target.copy(nodeWorld);
+      camera.position.copy(nodeWorld).add(cameraOffset);
+      camera.lookAt(nodeWorld);
+      controls.update();
+      return;
+    }
 
     const object = objects.find((o) => o.id === focusRequest.id);
     if (!object) return;
@@ -608,6 +702,8 @@ function Scene({
   onSelectNode,
   onSelectEdge,
   onSelectObject,
+  onDoubleClickNode,
+  onDoubleClickObject,
   onDeselectAll,
   meshOpacity,
   pcdLayers,
@@ -634,6 +730,8 @@ function Scene({
   onSelectNode: (id: number, additive: boolean) => void;
   onSelectEdge: (key: string | null) => void;
   onSelectObject: (id: number, additive: boolean) => void;
+  onDoubleClickNode: (id: number) => void;
+  onDoubleClickObject: (id: number) => void;
   onDeselectAll: () => void;
   meshOpacity: number;
   pcdLayers: { key: string; positions: Float32Array; colorHex: string }[];
@@ -644,7 +742,7 @@ function Scene({
   objectSize: number;
   objectLineThickness: number;
   selectableKinds: Set<PickKind>;
-  focusRequest: { id: number; nonce: number } | null;
+  focusRequest: { id: number; nonce: number; kind: "object" | "node" } | null;
 }) {
   const sceneGroupRef = useRef<THREE.Group>(null);
   const controlsRef = useRef<any>(null);
@@ -759,6 +857,8 @@ function Scene({
           onSelectNode={onSelectNode}
           onSelectEdge={onSelectEdge}
           onSelectObject={onSelectObject}
+          onDoubleClickNode={onDoubleClickNode}
+          onDoubleClickObject={onDoubleClickObject}
           onDeselectAll={onDeselectAll}
           onHoverTarget={handleHoverTarget}
           selectableKinds={selectableKinds}
@@ -846,7 +946,18 @@ export function App() {
   const [focusRequest, setFocusRequest] = useState<{
     id: number;
     nonce: number;
+    kind: "object" | "node";
   } | null>(null);
+
+  // Live (uncommitted) position previews. Kept outside editHistory so typing
+  // / stepping an XYZ axis updates the view immediately without creating an
+  // undo entry; blur / Enter still commits through the normal history path.
+  const [previewObjectPositions, setPreviewObjectPositions] = useState<
+    Map<number, [number, number, number]>
+  >(new Map());
+  const [previewNodePositions, setPreviewNodePositions] = useState<
+    Map<number, [number, number, number]>
+  >(new Map());
 
   // PCD point cloud loading
   // null = none, "all" = all objects, "scene:NAME" = scene PCD, number = specific object
@@ -903,6 +1014,44 @@ export function App() {
     },
     [],
   );
+
+  const setObjectPositionPreview = useCallback(
+    (id: number, position: [number, number, number]) => {
+      setPreviewObjectPositions((prev) => {
+        const next = new Map(prev);
+        next.set(id, position);
+        return next;
+      });
+    },
+    [],
+  );
+
+  const clearObjectPositionPreview = useCallback((id: number) => {
+    setPreviewObjectPositions((prev) => {
+      const next = new Map(prev);
+      next.delete(id);
+      return next;
+    });
+  }, []);
+
+  const setNodePositionPreview = useCallback(
+    (id: number, center: [number, number, number]) => {
+      setPreviewNodePositions((prev) => {
+        const next = new Map(prev);
+        next.set(id, center);
+        return next;
+      });
+    },
+    [],
+  );
+
+  const clearNodePositionPreview = useCallback((id: number) => {
+    setPreviewNodePositions((prev) => {
+      const next = new Map(prev);
+      next.delete(id);
+      return next;
+    });
+  }, []);
 
   // Phase 1: list all snapshots
   useEffect(() => {
@@ -1059,10 +1208,34 @@ export function App() {
     [],
   );
 
+  const handleDoubleClickObject = useCallback((id: number) => {
+    setSelectedObjectIds(new Set([id]));
+    setSelectedNodeIds(new Set());
+    setSelectedEdgeKey(null);
+    setFocusRequest((prev) => ({
+      id,
+      nonce: (prev?.nonce ?? 0) + 1,
+      kind: "object",
+    }));
+  }, []);
+
+  const handleDoubleClickNode = useCallback((id: number) => {
+    setSelectedNodeIds(new Set([id]));
+    setSelectedObjectIds(new Set());
+    setSelectedEdgeKey(null);
+    setFocusRequest((prev) => ({
+      id,
+      nonce: (prev?.nonce ?? 0) + 1,
+      kind: "node",
+    }));
+  }, []);
+
   const handleDeselectAll = useCallback(() => {
     setSelectedNodeIds(new Set());
     setSelectedEdgeKey(null);
     setSelectedObjectIds(new Set());
+    setPreviewObjectPositions(new Map());
+    setPreviewNodePositions(new Map());
   }, []);
 
   const handleConnectSelected = useCallback(() => {
@@ -1290,6 +1463,8 @@ export function App() {
         setSelectedNodeIds(new Set());
         setSelectedEdgeKey(null);
         setSelectedObjectIds(new Set());
+        setPreviewObjectPositions(new Map());
+        setPreviewNodePositions(new Map());
         return "view";
       }
       return "edit";
@@ -1303,6 +1478,8 @@ export function App() {
     setSelectedNodeIds(new Set());
     setSelectedEdgeKey(null);
     setSelectedObjectIds(new Set());
+    setPreviewObjectPositions(new Map());
+    setPreviewNodePositions(new Map());
     setBase("saved");
     setSelectedPcd(null);
     setPcdLayers([]);
@@ -1332,6 +1509,8 @@ export function App() {
     setSelectedNodeIds(new Set());
     setSelectedEdgeKey(null);
     setSelectedObjectIds(new Set());
+    setPreviewObjectPositions(new Map());
+    setPreviewNodePositions(new Map());
     setBase("saved");
     setError(null);
     setSelectedPcd(null);
@@ -1409,12 +1588,18 @@ export function App() {
     [data, mutations],
   );
 
+  // Preview positions only affect what is rendered; they never enter history.
+  const previewedTNodes = useMemo(
+    () => applyNodePreview(effectiveTNodes, previewNodePositions),
+    [effectiveTNodes, previewNodePositions],
+  );
+
   const effectiveTEdges = useMemo(
     () =>
       data
-        ? effectiveEdges(data.topoEdges, effectiveTNodes, mutations)
+        ? effectiveEdges(data.topoEdges, previewedTNodes, mutations)
         : [],
-    [data, mutations, effectiveTNodes],
+    [data, mutations, previewedTNodes],
   );
 
   const effectivePolys = useMemo(
@@ -1454,6 +1639,37 @@ export function App() {
     return effectiveObjects(data.objects, mutations, polyAreaMap);
   }, [data, mutations]);
 
+  const previewedTObjects = useMemo(
+    () => applyObjectPreview(effectiveTObjects, previewObjectPositions),
+    [effectiveTObjects, previewObjectPositions],
+  );
+
+  // Count live (uncommitted) previews that actually differ from the committed
+  // position. Returning a value back to its committed value removes the diff,
+  // so the toolbar's "changed" indicator disappears for a round-trip edit.
+  const liveChangedCount = useMemo(() => {
+    let count = 0;
+    for (const [id, position] of previewObjectPositions) {
+      const obj = effectiveTObjects.find((o) => o.id === id);
+      if (obj && !samePosition(obj.position, position)) count += 1;
+    }
+    for (const [id, position] of previewNodePositions) {
+      const node = effectiveTNodes.find((n) => n.id === id);
+      if (node && !samePosition(node.position, position)) count += 1;
+    }
+    return count;
+  }, [
+    previewObjectPositions,
+    previewNodePositions,
+    effectiveTObjects,
+    effectiveTNodes,
+  ]);
+
+  const committedMutationCount = mutationCount(mutations);
+  // Total unsaved differences shown in the toolbar: committed mutations plus
+  // any live position previews that have not been committed yet.
+  const changeCount = committedMutationCount + liveChangedCount;
+
   // Node lookup by id, for showing each object's father-poly node in the list.
   const effectiveNodeMap = useMemo(
     () => new Map(effectiveTNodes.map((n) => [n.id, n])),
@@ -1469,7 +1685,7 @@ export function App() {
       {/* Edit toolbar */}
       <EditToolbar
         editMode={editMode}
-        mutationCount={mutationCount(mutations)}
+        changeCount={changeCount}
         dirty={dirty}
         exporting={exporting}
         showDiff={showDiff}
@@ -1618,9 +1834,13 @@ export function App() {
               setSelectedNodeIds(new Set());
             }}
             onDoubleClick={(id) => {
+              setSelectedObjectIds(new Set([id]));
+              setSelectedNodeIds(new Set());
+              setSelectedEdgeKey(null);
               setFocusRequest((prev) => ({
                 id,
                 nonce: (prev?.nonce ?? 0) + 1,
+                kind: "object",
               }));
             }}
             onChangeOrder={(order) => {
@@ -1658,7 +1878,9 @@ export function App() {
                       commitEdit((current) =>
                         addUpdateObjectPosition(current, id, position),
                       );
+                      clearObjectPositionPreview(id);
                     }}
+                    onPreviewPosition={setObjectPositionPreview}
                     onColor={(id, color) => {
                       commitEdit((current) =>
                         addUpdateObjectColor(current, id, color),
@@ -1676,7 +1898,9 @@ export function App() {
                         commitEdit((current) =>
                           addMovePoly(current, id, center),
                         );
+                        clearNodePositionPreview(id);
                       }}
+                      onPreviewPosition={setNodePositionPreview}
                       onDelete={(id) => {
                         commitEdit((current) => addDeletePoly(current, id));
                         setSelectedNodeIds(new Set());
@@ -1692,7 +1916,9 @@ export function App() {
               node={effectiveTNodes.find((n) => selectedNodeIds.has(n.id))!}
               onChangePosition={(id, center) => {
                 commitEdit((current) => addMovePoly(current, id, center));
+                clearNodePositionPreview(id);
               }}
+              onPreviewPosition={setNodePositionPreview}
               onDelete={(id) => {
                 commitEdit((current) => addDeletePoly(current, id));
                 setSelectedNodeIds(new Set());
@@ -2046,11 +2272,11 @@ export function App() {
 
       {data ? (
         <Scene
-          effectiveNodes={effectiveTNodes}
+          effectiveNodes={previewedTNodes}
           effectiveEdges={effectiveTEdges}
           effectivePolys={effectivePolys}
           effectiveAreas={effectiveAreas}
-          effectiveObjects={effectiveTObjects}
+          effectiveObjects={previewedTObjects}
           layers={renderedLayers}
           selectedArea={selectedArea}
           selectedNodeIds={selectedNodeIds}
@@ -2060,6 +2286,8 @@ export function App() {
           onSelectNode={handleSelectNode}
           onSelectEdge={handleSelectEdge}
           onSelectObject={handleSelectObject}
+          onDoubleClickNode={handleDoubleClickNode}
+          onDoubleClickObject={handleDoubleClickObject}
           onDeselectAll={handleDeselectAll}
           meshOpacity={meshOpacity}
           pcdLayers={pcdLayers}

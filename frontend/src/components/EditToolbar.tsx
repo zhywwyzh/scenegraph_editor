@@ -2,7 +2,7 @@ import type { EditMode } from "../lib/types";
 
 interface Props {
   editMode: EditMode;
-  mutationCount: number;
+  changeCount: number;
   dirty: boolean;
   exporting: boolean;
   showDiff: boolean;
@@ -18,7 +18,7 @@ interface Props {
 
 export function EditToolbar({
   editMode,
-  mutationCount,
+  changeCount,
   dirty,
   exporting,
   showDiff,
@@ -104,9 +104,9 @@ export function EditToolbar({
             {exporting ? "Exporting..." : "Export"}
           </button>
 
-          {mutationCount > 0 && (
+          {changeCount > 0 && (
             <span style={{ color: "#f90", fontSize: 13 }}>
-              {mutationCount} changes
+              {changeCount} changes
             </span>
           )}
         </>
