@@ -402,12 +402,28 @@ function effectiveObjects(
 
 // ---- click handler (inside Canvas) ----
 
+type DragKind = "node" | "object";
+
+interface DragTarget {
+  kind: DragKind;
+  id: number;
+}
+
+interface DragSession {
+  target: DragTarget;
+  pointerId: number;
+  startLocal: [number, number, number];
+  moved: boolean;
+  lastLocal: [number, number, number];
+}
+
 function ClickHandler({
   nodes,
   edges,
   objects,
   editMode,
   sceneGroupRef,
+  controlsRef,
   onSelectNode,
   onSelectEdge,
   onSelectObject,
@@ -416,12 +432,15 @@ function ClickHandler({
   onDeselectAll,
   onHoverTarget,
   selectableKinds,
+  onDragPreview,
+  onDragCommit,
 }: {
   nodes: TopologicalNode[];
   edges: TopologicalEdge[];
   objects: SceneObject[];
   editMode: boolean;
   sceneGroupRef: RefObject<THREE.Group | null>;
+  controlsRef: RefObject<any>;
   onSelectNode: (id: number, additive: boolean) => void;
   onSelectEdge: (key: string) => void;
   onSelectObject: (id: number, additive: boolean) => void;
@@ -430,13 +449,60 @@ function ClickHandler({
   onDeselectAll: () => void;
   onHoverTarget: (target: PickTarget) => void;
   selectableKinds: Set<PickKind>;
+  onDragPreview: (
+    kind: DragKind,
+    id: number,
+    position: [number, number, number],
+  ) => void;
+  onDragCommit: (
+    kind: DragKind,
+    id: number,
+    position: [number, number, number],
+  ) => void;
 }) {
   const { gl, camera } = useThree();
+
+  // Keep the latest props in a ref so the event listeners don't need to be
+  // re-registered on every render. During a drag the preview position updates
+  // cause the parent to re-render the node/object arrays every pointermove;
+  // re-subscribing here would otherwise drop the active drag session.
+  const latestRef = useRef({
+    nodes,
+    edges,
+    objects,
+    selectableKinds,
+    onSelectNode,
+    onSelectEdge,
+    onSelectObject,
+    onDoubleClickNode,
+    onDoubleClickObject,
+    onDeselectAll,
+    onHoverTarget,
+    onDragPreview,
+    onDragCommit,
+  });
+  latestRef.current = {
+    nodes,
+    edges,
+    objects,
+    selectableKinds,
+    onSelectNode,
+    onSelectEdge,
+    onSelectObject,
+    onDoubleClickNode,
+    onDoubleClickObject,
+    onDeselectAll,
+    onHoverTarget,
+    onDragPreview,
+    onDragCommit,
+  };
+
+  const dragRef = useRef<DragSession | null>(null);
 
   useEffect(() => {
     const canvas = gl.domElement;
     if (!editMode) {
-      onHoverTarget(null);
+      latestRef.current.onHoverTarget(null);
       canvas.style.cursor = "";
       return;
     }
@@ -448,14 +514,15 @@ function ClickHandler({
       const sceneGroup = sceneGroupRef.current;
       if (!sceneGroup) return null;
 
+      const latest = latestRef.current;
       sceneGroup.updateWorldMatrix(true, false);
       camera.updateMatrixWorld();
       const rect = canvas.getBoundingClientRect();
       return pickTarget({
-        nodes,
-        edges,
-        objects,
-        selectableKinds,
+        nodes: latest.nodes,
+        edges: latest.edges,
+        objects: latest.objects,
+        selectableKinds: latest.selectableKinds,
         camera,
         sceneMatrixWorld: sceneGroup.matrixWorld,
         width: rect.width,
@@ -465,8 +532,80 @@ function ClickHandler({
       });
     };
 
-    const onDown = (e: MouseEvent) => {
+    const positionOf = (
+      target: DragTarget,
+    ): [number, number, number] | null => {
+      const latest = latestRef.current;
+      if (target.kind === "node") {
+        const node = latest.nodes.find((n) => n.id === target.id);
+        return node ? node.position : null;
+      }
+      const obj = latest.objects.find((o) => o.id === target.id);
+      return obj ? obj.position : null;
+    };
+
+    // Project the pointer onto the horizontal ground plane at the dragged
+    // point's current height, then map back to scene-local coordinates. This
+    // keeps the height fixed while the object/node follows the cursor across
+    // the floor with a 1:1, natural sensitivity.
+    const groundLocalAt = (
+      clientX: number,
+      clientY: number,
+      startLocal: [number, number, number],
+    ): [number, number, number] | null => {
+      const sceneGroup = sceneGroupRef.current;
+      if (!sceneGroup) return null;
+      sceneGroup.updateWorldMatrix(true, false);
+      camera.updateMatrixWorld();
+
+      const worldStart = new THREE.Vector3(
+        startLocal[0],
+        startLocal[1],
+        startLocal[2],
+      ).applyMatrix4(sceneGroup.matrixWorld);
+      const plane = new THREE.Plane(
+        new THREE.Vector3(0, 1, 0),
+        -worldStart.y,
+      );
+
+      const rect = canvas.getBoundingClientRect();
+      const ndc = new THREE.Vector2(
+        ((clientX - rect.left) / rect.width) * 2 - 1,
+        -((clientY - rect.top) / rect.height) * 2 + 1,
+      );
+      const raycaster = new THREE.Raycaster();
+      raycaster.setFromCamera(ndc, camera);
+      const worldCurrent = new THREE.Vector3();
+      const hit = raycaster.ray.intersectPlane(plane, worldCurrent);
+      if (!hit) return null;
+
+      const localCurrent = sceneGroup.worldToLocal(worldCurrent.clone());
+      return [localCurrent.x, localCurrent.y, localCurrent.z];
+    };
+
+    const onPointerDown = (e: PointerEvent) => {
       mouseDown.set(e.clientX, e.clientY);
+
+      const target = targetAt(e);
+      if (target?.kind !== "node" && target?.kind !== "object") return;
+
+      const position = positionOf(target);
+      if (!position) return;
+
+      dragRef.current = {
+        target,
+        pointerId: e.pointerId,
+        startLocal: position,
+        moved: false,
+        lastLocal: position,
+      };
+
+      // Disable OrbitControls for this gesture so dragging a node/object moves
+      // it instead of rotating the camera.
+      if (controlsRef.current) controlsRef.current.enabled = false;
+      try {
+        canvas.setPointerCapture(e.pointerId);
+      } catch {}
     };
 
     // Throttle hover picking to one pick per animation frame; pointermove can
@@ -480,18 +619,29 @@ function ClickHandler({
       const e = lastEvent;
       lastEvent = null;
       const target = targetAt(e);
-      onHoverTarget(target);
+      latestRef.current.onHoverTarget(target);
       canvas.style.cursor = target ? "pointer" : "";
     };
 
-    const onMove = (e: PointerEvent) => {
+    const onPointerMove = (e: PointerEvent) => {
+      const drag = dragRef.current;
+      if (drag && e.pointerId === drag.pointerId) {
+        const local = groundLocalAt(e.clientX, e.clientY, drag.startLocal);
+        if (local) {
+          drag.moved = true;
+          drag.lastLocal = local;
+          latestRef.current.onDragPreview(drag.target.kind, drag.target.id, local);
+        }
+        return;
+      }
+
       if (e.buttons !== 0) {
         if (rafId !== null) {
           cancelAnimationFrame(rafId);
           rafId = null;
         }
         lastEvent = null;
-        onHoverTarget(null);
+        latestRef.current.onHoverTarget(null);
         canvas.style.cursor = "";
         return;
       }
@@ -502,13 +652,34 @@ function ClickHandler({
       }
     };
 
+    const finishDrag = (e: PointerEvent) => {
+      const drag = dragRef.current;
+      if (!drag || e.pointerId !== drag.pointerId) return;
+      dragRef.current = null;
+
+      if (controlsRef.current) controlsRef.current.enabled = true;
+      try {
+        if (canvas.hasPointerCapture(e.pointerId)) {
+          canvas.releasePointerCapture(e.pointerId);
+        }
+      } catch {}
+
+      if (drag.moved) {
+        latestRef.current.onDragCommit(
+          drag.target.kind,
+          drag.target.id,
+          drag.lastLocal,
+        );
+      }
+    };
+
     const onLeave = () => {
       if (rafId !== null) {
         cancelAnimationFrame(rafId);
         rafId = null;
       }
       lastEvent = null;
-      onHoverTarget(null);
+      latestRef.current.onHoverTarget(null);
       canvas.style.cursor = "";
     };
 
@@ -528,21 +699,21 @@ function ClickHandler({
       const target = targetAt(e);
       if (target?.kind === "node") {
         e.stopPropagation();
-        onSelectNode(target.id, e.shiftKey || e.ctrlKey || e.metaKey);
+        latestRef.current.onSelectNode(target.id, e.shiftKey || e.ctrlKey || e.metaKey);
         return;
       }
       if (target?.kind === "edge") {
         e.stopPropagation();
-        onSelectEdge(target.key);
+        latestRef.current.onSelectEdge(target.key);
         return;
       }
       if (target?.kind === "object") {
         e.stopPropagation();
-        onSelectObject(target.id, e.shiftKey || e.ctrlKey || e.metaKey);
+        latestRef.current.onSelectObject(target.id, e.shiftKey || e.ctrlKey || e.metaKey);
         return;
       }
 
-      onDeselectAll();
+      latestRef.current.onDeselectAll();
     };
 
     const onDoubleClick = (e: MouseEvent) => {
@@ -558,25 +729,29 @@ function ClickHandler({
       const target = targetAt(e);
       if (target?.kind === "node") {
         e.stopPropagation();
-        onDoubleClickNode(target.id);
+        latestRef.current.onDoubleClickNode(target.id);
         return;
       }
       if (target?.kind === "object") {
         e.stopPropagation();
-        onDoubleClickObject(target.id);
+        latestRef.current.onDoubleClickObject(target.id);
         return;
       }
     };
 
     canvas.style.cursor = "";
-    canvas.addEventListener("mousedown", onDown, { capture: true });
-    canvas.addEventListener("pointermove", onMove, { capture: true });
+    canvas.addEventListener("pointerdown", onPointerDown, { capture: true });
+    canvas.addEventListener("pointermove", onPointerMove, { capture: true });
+    canvas.addEventListener("pointerup", finishDrag, { capture: true });
+    canvas.addEventListener("pointercancel", finishDrag, { capture: true });
     canvas.addEventListener("pointerleave", onLeave);
     canvas.addEventListener("click", onClick, { capture: true });
     canvas.addEventListener("dblclick", onDoubleClick, { capture: true });
     return () => {
-      canvas.removeEventListener("mousedown", onDown, { capture: true });
-      canvas.removeEventListener("pointermove", onMove, { capture: true });
+      canvas.removeEventListener("pointerdown", onPointerDown, { capture: true });
+      canvas.removeEventListener("pointermove", onPointerMove, { capture: true });
+      canvas.removeEventListener("pointerup", finishDrag, { capture: true });
+      canvas.removeEventListener("pointercancel", finishDrag, { capture: true });
       canvas.removeEventListener("pointerleave", onLeave);
       canvas.removeEventListener("click", onClick, { capture: true });
       canvas.removeEventListener("dblclick", onDoubleClick, { capture: true });
@@ -585,26 +760,14 @@ function ClickHandler({
         rafId = null;
       }
       lastEvent = null;
+      if (dragRef.current) {
+        if (controlsRef.current) controlsRef.current.enabled = true;
+        dragRef.current = null;
+      }
       canvas.style.cursor = "";
-      onHoverTarget(null);
+      latestRef.current.onHoverTarget(null);
     };
-  }, [
-    editMode,
-    nodes,
-    edges,
-    objects,
-    gl,
-    camera,
-    sceneGroupRef,
-    onSelectNode,
-    onSelectEdge,
-    onSelectObject,
-    onDoubleClickNode,
-    onDoubleClickObject,
-    onDeselectAll,
-    onHoverTarget,
-    selectableKinds,
-  ]);
+  }, [editMode, gl, camera, sceneGroupRef, controlsRef]);
 
   return null;
 }
@@ -715,6 +878,8 @@ function Scene({
   objectLineThickness,
   selectableKinds,
   focusRequest,
+  onDragPreview,
+  onDragCommit,
 }: {
   effectiveNodes: TopologicalNode[];
   effectiveEdges: TopologicalEdge[];
@@ -743,6 +908,16 @@ function Scene({
   objectLineThickness: number;
   selectableKinds: Set<PickKind>;
   focusRequest: { id: number; nonce: number; kind: "object" | "node" } | null;
+  onDragPreview: (
+    kind: "node" | "object",
+    id: number,
+    position: [number, number, number],
+  ) => void;
+  onDragCommit: (
+    kind: "node" | "object",
+    id: number,
+    position: [number, number, number],
+  ) => void;
 }) {
   const sceneGroupRef = useRef<THREE.Group>(null);
   const controlsRef = useRef<any>(null);
@@ -854,6 +1029,7 @@ function Scene({
           objects={layers.objects ? tObjects : []}
           editMode={editMode}
           sceneGroupRef={sceneGroupRef}
+          controlsRef={controlsRef}
           onSelectNode={onSelectNode}
           onSelectEdge={onSelectEdge}
           onSelectObject={onSelectObject}
@@ -862,6 +1038,8 @@ function Scene({
           onDeselectAll={onDeselectAll}
           onHoverTarget={handleHoverTarget}
           selectableKinds={selectableKinds}
+          onDragPreview={onDragPreview}
+          onDragCommit={onDragCommit}
         />
       </group>
 
@@ -1237,6 +1415,29 @@ export function App() {
     setPreviewObjectPositions(new Map());
     setPreviewNodePositions(new Map());
   }, []);
+
+  // ---- live dragging of nodes / objects ----
+
+  const handleDragPreview = useCallback(
+    (kind: "node" | "object", id: number, position: [number, number, number]) => {
+      if (kind === "node") setNodePositionPreview(id, position);
+      else setObjectPositionPreview(id, position);
+    },
+    [setNodePositionPreview, setObjectPositionPreview],
+  );
+
+  const handleDragCommit = useCallback(
+    (kind: "node" | "object", id: number, position: [number, number, number]) => {
+      if (kind === "node") {
+        commitEdit((current) => addMovePoly(current, id, position));
+        clearNodePositionPreview(id);
+      } else {
+        commitEdit((current) => addUpdateObjectPosition(current, id, position));
+        clearObjectPositionPreview(id);
+      }
+    },
+    [commitEdit, clearNodePositionPreview, clearObjectPositionPreview],
+  );
 
   const handleConnectSelected = useCallback(() => {
     const ids = [...selectedNodeIds];
@@ -2299,6 +2500,8 @@ export function App() {
           objectLineThickness={objectLineThickness}
           selectableKinds={selectableKinds}
           focusRequest={focusRequest}
+          onDragPreview={handleDragPreview}
+          onDragCommit={handleDragCommit}
         />
       ) : loading ? (
         <div

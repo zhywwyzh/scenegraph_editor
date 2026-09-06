@@ -407,6 +407,19 @@ function AxisRow({
     [commitFromDraft],
   );
 
+  const handleStep = useCallback(
+    (delta: number) => {
+      const base = Number(draft);
+      const current = Number.isFinite(base) ? base : localValue;
+      const next = Number((current + delta).toFixed(2));
+      if (!Number.isFinite(next)) return;
+      setDraft(next.toFixed(2));
+      setLocal(next);
+      previewAxis(axis, next);
+    },
+    [draft, localValue, axis, setLocal, previewAxis],
+  );
+
   return (
     <div style={{ marginBottom: 2 }}>
       <div
@@ -430,24 +443,73 @@ function AxisRow({
           {axis}
         </span>
         <input
-          type="number"
-          step={0.01}
+          type="text"
+          inputMode="decimal"
           value={draft}
           onChange={handleInputChange}
           onBlur={handleInputBlur}
           onKeyDown={handleInputKeyDown}
           style={{
-            width: 90,
+            width: 96,
+            height: 30,
             background: "#1a1a2e",
             color: "#eee",
             border: "1px solid #3498db",
             borderRadius: 4,
-            padding: "3px 6px",
+            padding: "4px 8px",
             fontFamily: "monospace",
-            fontSize: 12,
+            fontSize: 14,
             textAlign: "right",
           }}
         />
+        <div style={{ display: "flex", gap: 2 }}>
+          <button
+            type="button"
+            aria-label={`${axis} increase`}
+            onMouseDown={(e) => e.preventDefault()}
+            onClick={() => handleStep(0.01)}
+            style={{
+              width: 28,
+              height: 30,
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "center",
+              background: "#1a1a2e",
+              color: "#3498db",
+              border: "1px solid #3498db",
+              borderRadius: 4,
+              cursor: "pointer",
+              fontSize: 14,
+              lineHeight: 1,
+              padding: 0,
+            }}
+          >
+            ▲
+          </button>
+          <button
+            type="button"
+            aria-label={`${axis} decrease`}
+            onMouseDown={(e) => e.preventDefault()}
+            onClick={() => handleStep(-0.01)}
+            style={{
+              width: 28,
+              height: 30,
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "center",
+              background: "#1a1a2e",
+              color: "#3498db",
+              border: "1px solid #3498db",
+              borderRadius: 4,
+              cursor: "pointer",
+              fontSize: 14,
+              lineHeight: 1,
+              padding: 0,
+            }}
+          >
+            ▼
+          </button>
+        </div>
       </div>
     </div>
   );
