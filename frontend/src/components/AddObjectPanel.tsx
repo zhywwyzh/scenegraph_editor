@@ -1,10 +1,21 @@
 import { useState, useCallback, useEffect } from "react";
 
 interface Props {
-  onAdd: (areaId: number, x: number, y: number, z: number, size: number) => void;
+  onAdd: (
+    label: string,
+    position: [number, number, number],
+    color: [number, number, number],
+  ) => void;
   onCancel: () => void;
   /** Seed XYZ from a scene click; overrides the fields whenever it changes. */
   initialPosition?: [number, number, number];
+}
+
+function hexToRgb255(hex: string): [number, number, number] {
+  const m = /^#?([0-9a-f]{6})$/i.exec(hex.trim());
+  if (!m) return [230, 100, 30];
+  const n = parseInt(m[1], 16);
+  return [(n >> 16) & 255, (n >> 8) & 255, n & 255];
 }
 
 function formatCoord(v: number): string {
@@ -12,14 +23,15 @@ function formatCoord(v: number): string {
 }
 
 /**
- * Panel for creating a new topological node (poly) at an arbitrary position.
+ * Panel for creating a new marker object (no point cloud, not linked to any
+ * poly) at an arbitrary position with a user-defined label and color.
  */
-export function AddNodePanel({ onAdd, onCancel, initialPosition }: Props) {
+export function AddObjectPanel({ onAdd, onCancel, initialPosition }: Props) {
+  const [label, setLabel] = useState("");
   const [x, setX] = useState("0");
   const [y, setY] = useState("0");
   const [z, setZ] = useState("0");
-  const [areaId, setAreaId] = useState("-1");
-  const [size, setSize] = useState("1.0");
+  const [colorHex, setColorHex] = useState("#e6641e");
 
   useEffect(() => {
     if (!initialPosition) return;
@@ -32,11 +44,13 @@ export function AddNodePanel({ onAdd, onCancel, initialPosition }: Props) {
     const nx = Number(x);
     const ny = Number(y);
     const nz = Number(z);
-    const nArea = Number(areaId);
-    const nSize = Number(size);
     if (!isFinite(nx) || !isFinite(ny) || !isFinite(nz)) return;
-    onAdd(nArea, nx, ny, nz, Math.max(0.1, nSize));
-  }, [x, y, z, areaId, size, onAdd]);
+    onAdd(
+      label.trim() || "New Object",
+      [nx, ny, nz],
+      hexToRgb255(colorHex),
+    );
+  }, [label, x, y, z, colorHex, onAdd]);
 
   const inputStyle: React.CSSProperties = {
     width: 72,
@@ -70,21 +84,39 @@ export function AddNodePanel({ onAdd, onCancel, initialPosition }: Props) {
       }}
     >
       <div style={{ color: "#fff", fontWeight: 600, marginBottom: 10, fontSize: 13 }}>
-        Add New Node
+        Add New Object
       </div>
 
-      <Field label="X" value={x} onChange={setX} style={inputStyle} />
-      <Field label="Y" value={y} onChange={setY} style={inputStyle} />
-      <Field label="Z" value={z} onChange={setZ} style={inputStyle} />
+      <Field label="Label" value={label} onChange={setLabel} type="text" style={inputStyle} />
+      <Field label="X" value={x} onChange={setX} type="number" style={inputStyle} />
+      <Field label="Y" value={y} onChange={setY} type="number" style={inputStyle} />
+      <Field label="Z" value={z} onChange={setZ} type="number" style={inputStyle} />
 
       <div style={{ margin: "6px 0 4px", borderTop: "1px solid #333" }} />
 
-      <Field label="Area ID" value={areaId} onChange={setAreaId} style={inputStyle} />
-      <Field label="Size" value={size} onChange={setSize} style={inputStyle} />
+      <div style={{ display: "flex", alignItems: "center", gap: 6, marginTop: 4 }}>
+        <span style={{ display: "inline-block", width: 48, color: "#aaa", fontSize: 11 }}>
+          Color
+        </span>
+        <input
+          type="color"
+          value={colorHex}
+          onChange={(e) => setColorHex(e.target.value)}
+          style={{
+            width: 40,
+            height: 24,
+            borderRadius: 4,
+            border: "1px solid #3498db",
+            background: "transparent",
+            padding: 0,
+            cursor: "pointer",
+          }}
+        />
+      </div>
 
       <div style={{ marginTop: 10, display: "flex", gap: 8 }}>
         <button type="button" onClick={handleSubmit} style={btnPrimary}>
-          Create Node
+          Create Object
         </button>
         <button type="button" onClick={onCancel} style={btnSecondary}>
           Cancel
@@ -98,11 +130,13 @@ function Field({
   label,
   value,
   onChange,
+  type,
   style,
 }: {
   label: string;
   value: string;
   onChange: (v: string) => void;
+  type: "text" | "number";
   style: React.CSSProperties;
 }) {
   return (
@@ -111,8 +145,8 @@ function Field({
         {label}
       </span>
       <input
-        type="number"
-        step="any"
+        type={type}
+        step={type === "number" ? "any" : undefined}
         value={value}
         onChange={(e) => onChange(e.target.value)}
         style={style}

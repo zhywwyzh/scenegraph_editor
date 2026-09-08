@@ -11,6 +11,7 @@ interface Props {
   onReset: () => void;
   onExport: () => void;
   onAddNode: () => void;
+  onAddObject: () => void;
   onShowDiff?: () => void;
   onHideDiff?: () => void;
   onToggleShortcuts: () => void;
@@ -27,6 +28,7 @@ export function EditToolbar({
   onReset,
   onExport,
   onAddNode,
+  onAddObject,
   onShowDiff,
   onHideDiff,
   onToggleShortcuts,
@@ -74,6 +76,10 @@ export function EditToolbar({
 
           <button onClick={onAddNode} style={btnStyle} title="Add a new node at arbitrary XYZ">
             Add Node
+          </button>
+
+          <button onClick={onAddObject} style={btnStyle} title="Add a new marker object at arbitrary XYZ">
+            Add Object
           </button>
 
           <button

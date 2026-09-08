@@ -98,6 +98,13 @@ export interface CreatePoly {
   size: number;
 }
 
+export interface CreateObject {
+  label: string;
+  position: [number, number, number];
+  /** RGB color in 0–255 integer per channel, matching the raw object.color format */
+  color: [number, number, number];
+}
+
 export interface UpdateObjectLabel {
   id: number;
   label: string;
@@ -138,6 +145,7 @@ export interface Mutations {
   removeEdges: EdgeRef[];
   addEdges: EdgeRef[];
   createPoly: CreatePoly[];
+  createObjects: CreateObject[];
   updateObjectLabels: UpdateObjectLabel[];
   updateObjectFatherPolys: UpdateObjectFatherPoly[];
   updateObjectPositions: UpdateObjectPosition[];

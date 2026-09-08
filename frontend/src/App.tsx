@@ -18,6 +18,7 @@ import { ObjectsLayer } from "./components/ObjectsLayer";
 import { ObjectPropertyPanel } from "./components/ObjectPropertyPanel";
 import { ObjectsListPanel } from "./components/ObjectsListPanel";
 import { AddNodePanel } from "./components/AddNodePanel";
+import { AddObjectPanel } from "./components/AddObjectPanel";
 import { PointCloudLayer, type PcdColorScheme, SCHEME_LABELS } from "./components/PointCloudLayer";
 import { loadSceneGraph } from "./lib/scene-loader";
 import { loadPcd } from "./lib/pcd-loader";
@@ -50,6 +51,9 @@ import {
   addUpdateObjectId,
   addDeleteObject,
   addCreatePoly,
+  addUpdateCreatePolyPosition,
+  addCreateObject,
+  addUpdateCreateObjectPosition,
   addUpdateObjectOrder,
   addUpdateArea,
   addUpdateObjectColor,
@@ -378,6 +382,20 @@ function effectiveObjects(
       return obj;
     });
 
+  // Synthesise display objects for pending createObjects mutations. Negative
+  // temporary ids keep them distinct from real objects; the backend assigns
+  // fresh positive ids on export and the reload surfaces the real id.
+  let tempObjId = -1;
+  const created: SceneObject[] = m.createObjects.map((co) => ({
+    id: tempObjId--,
+    label: co.label,
+    position: [...co.position] as [number, number, number],
+    colorHex: rgb255ToHex(co.color),
+    areaId: -1,
+    fatherPolyId: -1,
+    cloudPath: "",
+  }));
+
   // Apply the user-defined object order (effective/current ids) when set.
   const order = m.objectOrder ?? [];
   if (order.length > 0) {
@@ -395,9 +413,9 @@ function effectiveObjects(
     for (const obj of result) {
       if (byId.has(obj.id)) ordered.push(obj);
     }
-    return ordered;
+    return [...ordered, ...created];
   }
-  return result;
+  return [...result, ...created];
 }
 
 // ---- click handler (inside Canvas) ----
@@ -434,6 +452,7 @@ function ClickHandler({
   selectableKinds,
   onDragPreview,
   onDragCommit,
+  onPickPosition,
 }: {
   nodes: TopologicalNode[];
   edges: TopologicalEdge[];
@@ -459,6 +478,7 @@ function ClickHandler({
     id: number,
     position: [number, number, number],
   ) => void;
+  onPickPosition?: (position: [number, number, number]) => void;
 }) {
   const { gl, camera } = useThree();
 
@@ -480,6 +500,7 @@ function ClickHandler({
     onHoverTarget,
     onDragPreview,
     onDragCommit,
+    onPickPosition,
   });
   latestRef.current = {
     nodes,
@@ -495,6 +516,7 @@ function ClickHandler({
     onHoverTarget,
     onDragPreview,
     onDragCommit,
+    onPickPosition,
   };
 
   const dragRef = useRef<DragSession | null>(null);
@@ -567,6 +589,35 @@ function ClickHandler({
         new THREE.Vector3(0, 1, 0),
         -worldStart.y,
       );
+
+      const rect = canvas.getBoundingClientRect();
+      const ndc = new THREE.Vector2(
+        ((clientX - rect.left) / rect.width) * 2 - 1,
+        -((clientY - rect.top) / rect.height) * 2 + 1,
+      );
+      const raycaster = new THREE.Raycaster();
+      raycaster.setFromCamera(ndc, camera);
+      const worldCurrent = new THREE.Vector3();
+      const hit = raycaster.ray.intersectPlane(plane, worldCurrent);
+      if (!hit) return null;
+
+      const localCurrent = sceneGroup.worldToLocal(worldCurrent.clone());
+      return [localCurrent.x, localCurrent.y, localCurrent.z];
+    };
+
+    // Seed position for the pending "Add Node / Add Object" panel: project the
+    // click onto the world ground plane (y = 0), then back to scene-local
+    // coordinates. The panel keeps X/Y/Z editable so height can be fine-tuned.
+    const groundY0At = (
+      clientX: number,
+      clientY: number,
+    ): [number, number, number] | null => {
+      const sceneGroup = sceneGroupRef.current;
+      if (!sceneGroup) return null;
+      sceneGroup.updateWorldMatrix(true, false);
+      camera.updateMatrixWorld();
+
+      const plane = new THREE.Plane(new THREE.Vector3(0, 1, 0), 0);
 
       const rect = canvas.getBoundingClientRect();
       const ndc = new THREE.Vector2(
@@ -695,6 +746,14 @@ function ClickHandler({
         el.tagName === "LABEL"
       )
         return;
+
+      // In position-pick mode (Add Node / Add Object), any click on the scene
+      // seeds the panel position instead of selecting an existing target.
+      if (latestRef.current.onPickPosition) {
+        const local = groundY0At(e.clientX, e.clientY);
+        if (local) latestRef.current.onPickPosition(local);
+        return;
+      }
 
       const target = targetAt(e);
       if (target?.kind === "node") {
@@ -880,6 +939,7 @@ function Scene({
   focusRequest,
   onDragPreview,
   onDragCommit,
+  onPickPosition,
 }: {
   effectiveNodes: TopologicalNode[];
   effectiveEdges: TopologicalEdge[];
@@ -918,6 +978,7 @@ function Scene({
     id: number,
     position: [number, number, number],
   ) => void;
+  onPickPosition?: (position: [number, number, number]) => void;
 }) {
   const sceneGroupRef = useRef<THREE.Group>(null);
   const controlsRef = useRef<any>(null);
@@ -1040,6 +1101,7 @@ function Scene({
           selectableKinds={selectableKinds}
           onDragPreview={onDragPreview}
           onDragCommit={onDragCommit}
+          onPickPosition={onPickPosition}
         />
       </group>
 
@@ -1048,7 +1110,6 @@ function Scene({
         ref={controlsRef}
         enableDamping
         dampingFactor={0.1}
-        maxDistance={400}
         minDistance={1}
       />
       <CameraFocusController
@@ -1120,6 +1181,11 @@ export function App() {
   const [connectionNotice, setConnectionNotice] =
     useState<ConnectionNotice | null>(null);
   const [showAddPanel, setShowAddPanel] = useState(false);
+  const [showAddObjectPanel, setShowAddObjectPanel] = useState(false);
+  const [addMode, setAddMode] = useState<"node" | "object" | null>(null);
+  const [pickedPosition, setPickedPosition] = useState<
+    [number, number, number] | null
+  >(null);
   const [showShortcuts, setShowShortcuts] = useState(false);
   const [focusRequest, setFocusRequest] = useState<{
     id: number;
@@ -1149,7 +1215,7 @@ export function App() {
   // Display controls
   const [nodeSize, setNodeSize] = useLocalStorageState("disp_nodeSize_v2", 0.1);
   const [topoEdgeThickness, setTopoEdgeThickness] = useLocalStorageState("disp_topoEdge_v2", 2);
-  const [objectSize, setObjectSize] = useLocalStorageState("disp_objSize_v2", 0.02);
+  const [objectSize, setObjectSize] = useLocalStorageState("disp_objSize_v4", 0.6);
   const [objectLineThickness, setObjectLineThickness] = useLocalStorageState("disp_objLine_v2", 0.01);
   const [pcdColorScheme, setPcdColorScheme] = useLocalStorageState<PcdColorScheme>("disp_pcdScheme", "flat");
   const [pcdPointSize, setPcdPointSize] = useLocalStorageState("disp_pcdPtSize", 0.06);
@@ -1432,7 +1498,13 @@ export function App() {
         commitEdit((current) => addMovePoly(current, id, position));
         clearNodePositionPreview(id);
       } else {
-        commitEdit((current) => addUpdateObjectPosition(current, id, position));
+        if (id < 0) {
+          commitEdit((current) =>
+            addUpdateCreateObjectPosition(current, -id - 1, position),
+          );
+        } else {
+          commitEdit((current) => addUpdateObjectPosition(current, id, position));
+        }
         clearObjectPositionPreview(id);
       }
     },
@@ -1894,7 +1966,18 @@ export function App() {
         onToggleEdit={handleToggleEdit}
         onReset={handleReset}
         onExport={handleExport}
-        onAddNode={() => setShowAddPanel(true)}
+        onAddNode={() => {
+          setShowAddObjectPanel(false);
+          setPickedPosition(null);
+          setAddMode("node");
+          setShowAddPanel(true);
+        }}
+        onAddObject={() => {
+          setShowAddPanel(false);
+          setPickedPosition(null);
+          setAddMode("object");
+          setShowAddObjectPanel(true);
+        }}
         onShowDiff={() => setShowDiff(true)}
         onHideDiff={() => setShowDiff(false)}
         onToggleShortcuts={() => setShowShortcuts((v) => !v)}
@@ -2076,9 +2159,15 @@ export function App() {
                       );
                     }}
                     onChangePosition={(id, position) => {
-                      commitEdit((current) =>
-                        addUpdateObjectPosition(current, id, position),
-                      );
+                      if (id < 0) {
+                        commitEdit((current) =>
+                          addUpdateCreateObjectPosition(current, -id - 1, position),
+                        );
+                      } else {
+                        commitEdit((current) =>
+                          addUpdateObjectPosition(current, id, position),
+                        );
+                      }
                       clearObjectPositionPreview(id);
                     }}
                     onPreviewPosition={setObjectPositionPreview}
@@ -2096,9 +2185,15 @@ export function App() {
                     <NodePropertyPanel
                       node={linkedNode}
                       onChangePosition={(id, center) => {
-                        commitEdit((current) =>
-                          addMovePoly(current, id, center),
-                        );
+                        if (id < 0) {
+                          commitEdit((current) =>
+                            addUpdateCreatePolyPosition(current, -id - 1, center),
+                          );
+                        } else {
+                          commitEdit((current) =>
+                            addMovePoly(current, id, center),
+                          );
+                        }
                         clearNodePositionPreview(id);
                       }}
                       onPreviewPosition={setNodePositionPreview}
@@ -2116,7 +2211,13 @@ export function App() {
             <NodePropertyPanel
               node={effectiveTNodes.find((n) => selectedNodeIds.has(n.id))!}
               onChangePosition={(id, center) => {
-                commitEdit((current) => addMovePoly(current, id, center));
+                if (id < 0) {
+                  commitEdit((current) =>
+                    addUpdateCreatePolyPosition(current, -id - 1, center),
+                  );
+                } else {
+                  commitEdit((current) => addMovePoly(current, id, center));
+                }
                 clearNodePositionPreview(id);
               }}
               onPreviewPosition={setNodePositionPreview}
@@ -2150,13 +2251,39 @@ export function App() {
 
       {editMode === "edit" && showAddPanel && (
         <AddNodePanel
+          initialPosition={pickedPosition ?? undefined}
           onAdd={(areaId, x, y, z, size) => {
             commitEdit((current) =>
               addCreatePoly(current, areaId, [x, y, z], size),
             );
             setShowAddPanel(false);
+            setAddMode(null);
+            setPickedPosition(null);
           }}
-          onCancel={() => setShowAddPanel(false)}
+          onCancel={() => {
+            setShowAddPanel(false);
+            setAddMode(null);
+            setPickedPosition(null);
+          }}
+        />
+      )}
+
+      {editMode === "edit" && showAddObjectPanel && (
+        <AddObjectPanel
+          initialPosition={pickedPosition ?? undefined}
+          onAdd={(label, position, color) => {
+            commitEdit((current) =>
+              addCreateObject(current, label, position, color),
+            );
+            setShowAddObjectPanel(false);
+            setAddMode(null);
+            setPickedPosition(null);
+          }}
+          onCancel={() => {
+            setShowAddObjectPanel(false);
+            setAddMode(null);
+            setPickedPosition(null);
+          }}
         />
       )}
 
@@ -2441,31 +2568,9 @@ export function App() {
             </div>
             <Slider label="Node size" value={nodeSize} min={0.02} max={0.50} step={0.01} onChange={setNodeSize} />
             <Slider label="Edge thick" value={topoEdgeThickness} min={0.5} max={4.0} step={0.5} onChange={setTopoEdgeThickness} />
-            <Slider label="Object size" value={objectSize} min={0.02} max={0.50} step={0.01} onChange={setObjectSize} />
+            <Slider label="Object size" value={objectSize} min={0.02} max={1.00} step={0.01} onChange={setObjectSize} />
             <Slider label="Obj line" value={objectLineThickness} min={0.01} max={0.20} step={0.005} onChange={setObjectLineThickness} />
 
-            </div>
-          )}
-
-          {/* Stats (non-edit only; edit mode shows shortcut help instead) */}
-          {editMode !== "edit" && (
-            <div
-              style={{
-                position: "absolute",
-                bottom: 16,
-                right: 16,
-                zIndex: 10,
-                background: "rgba(0,0,0,0.6)",
-                borderRadius: 6,
-                padding: "6px 12px",
-                color: "#888",
-                fontFamily: "monospace",
-                fontSize: 11,
-              }}
-            >
-              Polys: {effectivePolys.length} &middot; Nodes:{" "}
-              {effectiveTNodes.length} &middot; TopoEdges:{" "}
-              {effectiveTEdges.length}
             </div>
           )}
         </>
@@ -2502,6 +2607,9 @@ export function App() {
           focusRequest={focusRequest}
           onDragPreview={handleDragPreview}
           onDragCommit={handleDragCommit}
+          onPickPosition={
+            addMode ? (position) => setPickedPosition(position) : undefined
+          }
         />
       ) : loading ? (
         <div

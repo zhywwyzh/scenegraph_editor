@@ -10,6 +10,27 @@ function c3(v: any, fb: number): number {
   return isFinite(n) ? n : fb;
 }
 
+function clamp01(v: number): number {
+  return Math.max(0, Math.min(1, v));
+}
+
+/**
+ * Object colors are stored as 0–255 ints in most entries, but a few entries
+ * (e.g. special origin markers) carry already-normalized floats that may be
+ * slightly out of [0, 1]. Distinguish by whether the channels are whole
+ * numbers (0–255 ints) versus fractional floats, then clamp to a valid range.
+ */
+function normalizeObjectColor(raw: any): [number, number, number] {
+  const r = c3(raw?.[0], 230);
+  const g = c3(raw?.[1], 100);
+  const b = c3(raw?.[2], 30);
+  const isInt = (v: number) => Number.isFinite(v) && Math.abs(v - Math.round(v)) < 1e-6;
+  if (isInt(r) && isInt(g) && isInt(b)) {
+    return [clamp01(r / 255), clamp01(g / 255), clamp01(b / 255)];
+  }
+  return [clamp01(r), clamp01(g), clamp01(b)];
+}
+
 function asV3(v: any): [number, number, number] {
   return [c3(v?.[0], 0), c3(v?.[1], 0), c3(v?.[2], 0)];
 }
@@ -139,10 +160,7 @@ export async function loadSceneGraph(path: string): Promise<SceneData> {
   // Objects
   const objects: SceneObject[] = (root.objects || []).map((o: any) => {
     const rawColor = o.color || [230, 100, 30];
-    // Object colors are 0-255 ints; normalize to 0-1
-    const normR = c3(rawColor[0] / 255, 0.9);
-    const normG = c3(rawColor[1] / 255, 0.4);
-    const normB = c3(rawColor[2] / 255, 0.1);
+    const [normR, normG, normB] = normalizeObjectColor(rawColor);
     const fatherPolyId = Number(o?.edge?.father_poly_id ?? -1);
     const areaId = polyAreaMap.get(fatherPolyId) ?? -1;
     const cloudPath = String(o?.files?.cloud ?? "");

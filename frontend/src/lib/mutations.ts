@@ -8,6 +8,7 @@ export function emptyMutations(): Mutations {
     removeEdges: [],
     addEdges: [],
     createPoly: [],
+    createObjects: [],
     updateObjectLabels: [],
     updateObjectFatherPolys: [],
     updateObjectPositions: [],
@@ -27,6 +28,7 @@ export function mutationCount(m: Mutations): number {
     m.removeEdges.length +
     m.addEdges.length +
     m.createPoly.length +
+    m.createObjects.length +
     m.updateObjectLabels.length +
     m.updateObjectFatherPolys.length +
     m.updateObjectPositions.length +
@@ -124,6 +126,63 @@ export function addCreatePoly(
 ): Mutations {
   const n = shallowCopy(m);
   n.createPoly = [...n.createPoly, { areaId, center: [...center] as [number, number, number], size }];
+  return n;
+}
+
+/**
+ * Move a pending createPoly entry (identified by its display index, i.e. the
+ * synthetic negative id from effectiveNodes) while it has not yet been
+ * exported to a real poly id.
+ */
+export function addUpdateCreatePolyPosition(
+  m: Mutations,
+  index: number,
+  center: [number, number, number],
+): Mutations {
+  const n = shallowCopy(m);
+  if (index < 0 || index >= n.createPoly.length) return n;
+  n.createPoly[index] = {
+    ...n.createPoly[index],
+    center: [...center] as [number, number, number],
+  };
+  return n;
+}
+
+/** Append a new marker object (no point cloud, father_poly_id = -1). */
+export function addCreateObject(
+  m: Mutations,
+  label: string,
+  position: [number, number, number],
+  color: [number, number, number],
+): Mutations {
+  const n = shallowCopy(m);
+  n.createObjects = [
+    ...n.createObjects,
+    {
+      label,
+      position: [...position] as [number, number, number],
+      color: [...color] as [number, number, number],
+    },
+  ];
+  return n;
+}
+
+/**
+ * Move a pending createObjects entry (identified by its display index, i.e.
+ * the synthetic negative id from effectiveObjects) while it has not yet been
+ * exported to a real object id.
+ */
+export function addUpdateCreateObjectPosition(
+  m: Mutations,
+  index: number,
+  position: [number, number, number],
+): Mutations {
+  const n = shallowCopy(m);
+  if (index < 0 || index >= n.createObjects.length) return n;
+  n.createObjects[index] = {
+    ...n.createObjects[index],
+    position: [...position] as [number, number, number],
+  };
   return n;
 }
 
@@ -272,6 +331,11 @@ function shallowCopy(m: Mutations): Mutations {
     removeEdges: m.removeEdges.map((x) => ({ ...x })),
     addEdges: m.addEdges.map((x) => ({ ...x })),
     createPoly: m.createPoly.map((x) => ({ areaId: x.areaId, center: [...x.center] as [number, number, number], size: x.size })),
+    createObjects: m.createObjects.map((x) => ({
+      label: x.label,
+      position: [...x.position] as [number, number, number],
+      color: [...x.color] as [number, number, number],
+    })),
     updateObjectLabels: m.updateObjectLabels.map((x) => ({ ...x })),
     updateObjectFatherPolys: m.updateObjectFatherPolys.map((x) => ({ ...x })),
     updateObjectPositions: m.updateObjectPositions.map((x) => ({

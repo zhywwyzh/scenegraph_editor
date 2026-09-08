@@ -26,6 +26,7 @@ import type {
   MovePoly,
   EdgeRef,
   CreatePoly,
+  CreateObject,
   UpdateObjectLabel,
   UpdateObjectFatherPoly,
   UpdateObjectPosition,
@@ -107,6 +108,7 @@ function applyMutations(root: any, mutations: Mutations): UpdateObjectId[] {
   applyRemoveEdges(root, mutations.removeEdges);
   applyAddEdges(root, mutations.addEdges);
   applyCreatePolys(root, mutations.createPoly);
+  applyCreateObjects(root, mutations.createObjects);
   // Object id renames run first — the frontend rewrites all other object
   // mutations to reference the new id, so they must run after the rename.
   const appliedRenames = applyUpdateObjectIds(root, mutations.updateObjectIds);
@@ -494,6 +496,38 @@ function applyCreatePolys(root: any, creates: CreatePoly[]): void {
         (Number(area.box_min[2]) + Number(area.box_max[2])) / 2,
       ];
     }
+  }
+}
+
+/**
+ * Append marker-only objects (no point cloud, not linked to any poly). The
+ * frontend sends label / position / color (0–255) and we allocate fresh ids
+ * above the current max so existing objects and their files are untouched.
+ */
+function applyCreateObjects(root: any, creates: CreateObject[]): void {
+  if (!creates || creates.length === 0) return;
+
+  let maxObjectId = 0;
+  for (const o of root.objects || []) {
+    maxObjectId = Math.max(maxObjectId, Number(o.id));
+  }
+
+  if (!root.objects) root.objects = [];
+
+  for (const co of creates) {
+    maxObjectId += 1;
+    root.objects.push({
+      id: maxObjectId,
+      label: co.label,
+      pos: [...co.position] as V3,
+      color: [...co.color] as [number, number, number],
+      edge: {
+        father_poly_id: -1,
+        father_object_id: -1,
+        child_object_ids: [],
+      },
+      files: { cloud: "" },
+    });
   }
 }
 
