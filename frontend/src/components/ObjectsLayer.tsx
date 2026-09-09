@@ -29,23 +29,15 @@ export function ObjectsLayer({
   objectSize,
   lineThickness,
 }: Props) {
-  // Batch-render spheres grouped by (area, color) for performance. Grouping by
-  // color is important: each object carries its own color, and previously the
-  // whole area was painted with the first object's color (often black).
+  // Batch-render spheres grouped by area for performance
   const groups = useMemo(() => {
-    const byKey = new Map<
-      string,
-      { areaId: number; colorHex: string; objs: SceneObject[] }
-    >();
+    const byArea = new Map<number, SceneObject[]>();
     for (const o of objects) {
-      const colorHex = o.colorHex ?? "#e66";
-      const key = `${o.areaId}|${colorHex}`;
-      if (!byKey.has(key)) {
-        byKey.set(key, { areaId: o.areaId, colorHex, objs: [] });
-      }
-      byKey.get(key)!.objs.push(o);
+      const key = o.areaId;
+      if (!byArea.has(key)) byArea.set(key, []);
+      byArea.get(key)!.push(o);
     }
-    return [...byKey.values()].map(({ areaId, colorHex, objs }) => {
+    return [...byArea.entries()].map(([areaId, objs]) => {
       const pos = new Float32Array(objs.length * 3);
       for (let i = 0; i < objs.length; i++) {
         pos[i * 3] = objs[i].position[0];
@@ -53,7 +45,7 @@ export function ObjectsLayer({
         pos[i * 3 + 2] = objs[i].position[2];
       }
       const dimmed = selectedArea !== null && selectedArea !== areaId;
-      return { areaId, colorHex, positions: pos, color: colorHex, dimmed };
+      return { areaId, positions: pos, color: objs[0]?.colorHex ?? "#e66", dimmed };
     });
   }, [objects, selectedArea]);
 
@@ -87,8 +79,8 @@ export function ObjectsLayer({
   return (
     <>
       {/* Batch spheres */}
-      {groups.map(({ areaId, colorHex, positions, color, dimmed }) => (
-        <points key={`obj-${areaId}-${colorHex}`}>
+      {groups.map(({ areaId, positions, color, dimmed }) => (
+        <points key={`obj-${areaId}`}>
           <bufferGeometry>
             <bufferAttribute
               attach="attributes-position"

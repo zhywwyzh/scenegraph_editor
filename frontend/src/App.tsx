@@ -20,6 +20,7 @@ import { ObjectsListPanel } from "./components/ObjectsListPanel";
 import { AddNodePanel } from "./components/AddNodePanel";
 import { AddObjectPanel } from "./components/AddObjectPanel";
 import { PointCloudLayer, type PcdColorScheme, SCHEME_LABELS } from "./components/PointCloudLayer";
+import { GaussianSplatLayer, splatFormatOf, type SplatFormat } from "./components/GaussianSplatLayer";
 import { loadSceneGraph } from "./lib/scene-loader";
 import { loadPcd } from "./lib/pcd-loader";
 import { logEvent } from "./lib/logger";
@@ -51,9 +52,7 @@ import {
   addUpdateObjectId,
   addDeleteObject,
   addCreatePoly,
-  addUpdateCreatePolyPosition,
   addCreateObject,
-  addUpdateCreateObjectPosition,
   addUpdateObjectOrder,
   addUpdateArea,
   addUpdateObjectColor,
@@ -931,6 +930,11 @@ function Scene({
   pcdLayers,
   pcdPointSize,
   pcdColorScheme,
+  renderMode,
+  splatSrc,
+  splatFormat,
+  onSplatLoadingChange,
+  onSplatError,
   nodeSize,
   topoEdgeThickness,
   objectSize,
@@ -962,6 +966,11 @@ function Scene({
   pcdLayers: { key: string; positions: Float32Array; colorHex: string }[];
   pcdPointSize: number;
   pcdColorScheme: PcdColorScheme;
+  renderMode: "pointcloud" | "3dgs";
+  splatSrc: string | null;
+  splatFormat: SplatFormat;
+  onSplatLoadingChange: (loading: boolean) => void;
+  onSplatError: (message: string | null) => void;
   nodeSize: number;
   topoEdgeThickness: number;
   objectSize: number;
@@ -1074,15 +1083,28 @@ function Scene({
             lineThickness={objectLineThickness}
           />
         )}
-        {pcdLayers.map((layer) => (
-          <PointCloudLayer
-            key={layer.key}
-            positions={layer.positions}
-            colorHex={layer.colorHex}
-            pointSize={pcdPointSize}
-            colorScheme={pcdColorScheme}
+        {renderMode === "pointcloud" &&
+          pcdLayers.map((layer) => (
+            <PointCloudLayer
+              key={layer.key}
+              positions={layer.positions}
+              colorHex={layer.colorHex}
+              pointSize={pcdPointSize}
+              colorScheme={pcdColorScheme}
+            />
+          ))}
+        {/* 3DGS mode: DropInViewer lives in the same rotated (Z-up→Y-up)
+            group as the PCD layers, so coordinates stay aligned across
+            render modes. Keyed by src so switching files rebuilds cleanly. */}
+        {renderMode === "3dgs" && splatSrc && (
+          <GaussianSplatLayer
+            key={splatSrc}
+            src={splatSrc}
+            format={splatFormat}
+            onLoadingChange={onSplatLoadingChange}
+            onError={onSplatError}
           />
-        ))}
+        )}
         {/* Click handler: processes node/edge/object selection. */}
         <ClickHandler
           nodes={layers.topoNodes ? tNodes : []}
@@ -1110,6 +1132,7 @@ function Scene({
         ref={controlsRef}
         enableDamping
         dampingFactor={0.1}
+        maxDistance={400}
         minDistance={1}
       />
       <CameraFocusController
@@ -1165,6 +1188,10 @@ export function App() {
 
   // Edit state
   const [editMode, setEditMode] = useState<EditMode>("view");
+  // Mirrors editMode for event handlers that need the current value
+  // (updaters must stay pure under StrictMode double-invocation).
+  const editModeRef = useRef<EditMode>(editMode);
+  editModeRef.current = editMode;
   const [selectedNodeIds, setSelectedNodeIds] = useState<Set<number>>(
     new Set(),
   );
@@ -1212,10 +1239,26 @@ export function App() {
   // Cache parsed scene-level clouds so export reload doesn't re-parse huge files.
   const scenePcdCacheRef = useRef(new Map<string, { positions: Float32Array; colorHex: string }>());
 
+  // Render mode (view mode only; entering edit mode forces "pointcloud").
+  // Not persisted: always starts on "pointcloud" regardless of prior choice.
+  const [renderMode, setRenderMode] = useState<"pointcloud" | "3dgs">(
+    "pointcloud",
+  );
+  // Active gaussian-splat asset (a file name in pcd/). Not persisted: it is
+  // auto-picked from the available list, so a deleted file can never strand
+  // the app on a broken selection at startup.
+  const [selectedSplat, setSelectedSplat] = useState<string | null>(null);
+  const [splatLoading, setSplatLoading] = useState(false);
+  const [splatError, setSplatError] = useState<string | null>(null);
+  // Split the listing: .pcd stays in the point-cloud dropdown, splat formats
+  // (.ply/.splat/.ksplat/.spz) populate the 3DGS selector.
+  const pcdSceneFiles = useMemo(() => scenePcds.filter((n) => n.toLowerCase().endsWith(".pcd")), [scenePcds]);
+  const splatFiles = useMemo(() => scenePcds.filter((n) => splatFormatOf(n) !== null), [scenePcds]);
+
   // Display controls
   const [nodeSize, setNodeSize] = useLocalStorageState("disp_nodeSize_v2", 0.1);
   const [topoEdgeThickness, setTopoEdgeThickness] = useLocalStorageState("disp_topoEdge_v2", 2);
-  const [objectSize, setObjectSize] = useLocalStorageState("disp_objSize_v4", 0.6);
+  const [objectSize, setObjectSize] = useLocalStorageState("disp_objSize_v2", 0.02);
   const [objectLineThickness, setObjectLineThickness] = useLocalStorageState("disp_objLine_v2", 0.01);
   const [pcdColorScheme, setPcdColorScheme] = useLocalStorageState<PcdColorScheme>("disp_pcdScheme", "flat");
   const [pcdPointSize, setPcdPointSize] = useLocalStorageState("disp_pcdPtSize", 0.06);
@@ -1232,13 +1275,31 @@ export function App() {
     });
   }, []);
 
-  // Fetch available scene-level PCDs
+  // Fetch available scene-level cloud/splat files
   useEffect(() => {
     fetch("/api/scene-pcds")
       .then((r) => r.json())
       .then((j) => setScenePcds((j.files || []).map((f: any) => f.name)))
-      .catch(() => {});
+      .catch((e) => console.warn("Failed to list scene pcds:", e));
   }, []);
+
+  // 3DGS fallbacks: a renderMode="3dgs" is useless (and would show an empty
+  // scene) when no splat assets exist — fall back to pointcloud. Otherwise
+  // auto-pick the first splat file once, and keep the selection valid if the
+  // underlying file disappears from the listing.
+  useEffect(() => {
+    if (renderMode === "3dgs" && scenePcds.length > 0 && splatFiles.length === 0) {
+      setRenderMode("pointcloud");
+    }
+  }, [renderMode, scenePcds, splatFiles, setRenderMode]);
+
+  useEffect(() => {
+    if (splatFiles.length === 0) {
+      setSelectedSplat(null);
+      return;
+    }
+    setSelectedSplat((cur) => (cur && splatFiles.includes(cur) ? cur : splatFiles[0]));
+  }, [splatFiles]);
 
   const mutations = editHistory.present;
 
@@ -1335,8 +1396,12 @@ export function App() {
     })();
   }, [snapshot]);
 
-  // Load PCD point cloud(s) when selection changes
+  // Load PCD point cloud(s) when selection changes.
+  // Skipped while the 3DGS renderer is active (nothing to render it into);
+  // switching back to pointcloud re-runs this effect and refreshes the data.
+  // Existing pcdLayers are intentionally kept so the switch back is instant.
   useEffect(() => {
+    if (renderMode !== "pointcloud") return;
     if (selectedPcd === null || !data) {
       setPcdLayers([]);
       return;
@@ -1402,7 +1467,7 @@ export function App() {
           setPcdLoading(false);
         });
     }
-  }, [selectedPcd, snapshot, data]);
+  }, [renderMode, selectedPcd, snapshot, data]);
 
   const handleSelectNode = useCallback(
     (id: number, additive: boolean) => {
@@ -1498,13 +1563,7 @@ export function App() {
         commitEdit((current) => addMovePoly(current, id, position));
         clearNodePositionPreview(id);
       } else {
-        if (id < 0) {
-          commitEdit((current) =>
-            addUpdateCreateObjectPosition(current, -id - 1, position),
-          );
-        } else {
-          commitEdit((current) => addUpdateObjectPosition(current, id, position));
-        }
+        commitEdit((current) => addUpdateObjectPosition(current, id, position));
         clearObjectPositionPreview(id);
       }
     },
@@ -1730,19 +1789,23 @@ export function App() {
   // ---- edit mode toggle ----
 
   const handleToggleEdit = useCallback(() => {
-    setEditMode((prev) => {
-      if (prev === "edit") {
-        // Clear selections when leaving edit mode
-        setSelectedNodeIds(new Set());
-        setSelectedEdgeKey(null);
-        setSelectedObjectIds(new Set());
-        setPreviewObjectPositions(new Map());
-        setPreviewNodePositions(new Map());
-        return "view";
-      }
-      return "edit";
-    });
-  }, []);
+    // State updaters must be pure (StrictMode double-invokes them), so the
+    // mode-dependent side effects run in the handler body, not inside
+    // setEditMode. editModeRef mirrors the current mode for this read.
+    if (editModeRef.current === "edit") {
+      // Clear selections when leaving edit mode
+      setSelectedNodeIds(new Set());
+      setSelectedEdgeKey(null);
+      setSelectedObjectIds(new Set());
+      setPreviewObjectPositions(new Map());
+      setPreviewNodePositions(new Map());
+      setEditMode("view");
+    } else {
+      // Editing only works on the point-cloud renderer; leave 3DGS behind.
+      setRenderMode("pointcloud");
+      setEditMode("edit");
+    }
+  }, [setRenderMode]);
 
   // ---- reset ----
 
@@ -2159,15 +2222,9 @@ export function App() {
                       );
                     }}
                     onChangePosition={(id, position) => {
-                      if (id < 0) {
-                        commitEdit((current) =>
-                          addUpdateCreateObjectPosition(current, -id - 1, position),
-                        );
-                      } else {
-                        commitEdit((current) =>
-                          addUpdateObjectPosition(current, id, position),
-                        );
-                      }
+                      commitEdit((current) =>
+                        addUpdateObjectPosition(current, id, position),
+                      );
                       clearObjectPositionPreview(id);
                     }}
                     onPreviewPosition={setObjectPositionPreview}
@@ -2185,15 +2242,9 @@ export function App() {
                     <NodePropertyPanel
                       node={linkedNode}
                       onChangePosition={(id, center) => {
-                        if (id < 0) {
-                          commitEdit((current) =>
-                            addUpdateCreatePolyPosition(current, -id - 1, center),
-                          );
-                        } else {
-                          commitEdit((current) =>
-                            addMovePoly(current, id, center),
-                          );
-                        }
+                        commitEdit((current) =>
+                          addMovePoly(current, id, center),
+                        );
                         clearNodePositionPreview(id);
                       }}
                       onPreviewPosition={setNodePositionPreview}
@@ -2211,13 +2262,7 @@ export function App() {
             <NodePropertyPanel
               node={effectiveTNodes.find((n) => selectedNodeIds.has(n.id))!}
               onChangePosition={(id, center) => {
-                if (id < 0) {
-                  commitEdit((current) =>
-                    addUpdateCreatePolyPosition(current, -id - 1, center),
-                  );
-                } else {
-                  commitEdit((current) => addMovePoly(current, id, center));
-                }
+                commitEdit((current) => addMovePoly(current, id, center));
                 clearNodePositionPreview(id);
               }}
               onPreviewPosition={setNodePositionPreview}
@@ -2383,6 +2428,77 @@ export function App() {
               Layers
             </div>
 
+            {/* Render mode: point cloud or 3DGS (view mode only; edit mode
+                always uses the point-cloud renderer). */}
+            <div style={{ fontSize: 12, color: "#888", marginBottom: 4 }}>
+              Render Mode
+            </div>
+            <select
+              value={renderMode}
+              onChange={(e) => setRenderMode(e.target.value as "pointcloud" | "3dgs")}
+              style={{
+                width: "100%",
+                background: "#1a1a2e",
+                color: "#ddd",
+                border: "1px solid #555",
+                borderRadius: 4,
+                padding: "3px 4px",
+                fontFamily: "monospace",
+                fontSize: 13,
+                marginBottom: 8,
+              }}
+            >
+              <option value="pointcloud">Point Cloud</option>
+              <option value="3dgs" disabled={splatFiles.length === 0}>
+                Gaussian Splatting {splatFiles.length === 0 ? "(no splat files)" : ""}
+              </option>
+            </select>
+
+            {renderMode === "3dgs" && (
+              <>
+                <div style={{ fontSize: 12, color: "#888", marginBottom: 4 }}>
+                  Gaussian Splat
+                </div>
+                <select
+                  value={selectedSplat ?? ""}
+                  onChange={(e) => setSelectedSplat(e.target.value || null)}
+                  style={{
+                    width: "100%",
+                    background: "#1a1a2e",
+                    color: "#ddd",
+                    border: "1px solid #555",
+                    borderRadius: 4,
+                    padding: "3px 4px",
+                    fontFamily: "monospace",
+                    fontSize: 13,
+                  }}
+                >
+                  {splatFiles.map((name) => (
+                    <option key={name} value={name}>
+                      ◆ {name}
+                    </option>
+                  ))}
+                </select>
+                {splatLoading && (
+                  <div style={{ fontSize: 12, color: "#888", marginTop: 3 }}>
+                    Loading splat…
+                  </div>
+                )}
+                {splatError && (
+                  <div
+                    style={{
+                      fontSize: 11,
+                      color: "#ff6b6b",
+                      marginTop: 3,
+                      wordBreak: "break-word",
+                    }}
+                  >
+                    {splatError}
+                  </div>
+                )}
+              </>
+            )}
+
             <Toggle
               label="Area Boxes"
               k="areas"
@@ -2469,7 +2585,9 @@ export function App() {
               toggle={toggle}
             />
 
-            {/* PCD point-cloud selector */}
+            {/* PCD point-cloud selector (point-cloud render mode only) */}
+            {renderMode === "pointcloud" && (
+            <>
             <div style={{ margin: "6px 0 4px", borderTop: "1px solid #333" }} />
             <div style={{ fontSize: 12, color: "#888", marginBottom: 4 }}>
               Point Cloud
@@ -2493,7 +2611,7 @@ export function App() {
             >
               <option value="">None</option>
               <optgroup label="Scene Clouds">
-                {scenePcds.map((name) => (
+                {pcdSceneFiles.map((name) => (
                   <option key={`scene:${name}`} value={`scene:${name}`}>
                     ◆ {name}
                   </option>
@@ -2552,6 +2670,8 @@ export function App() {
                 ))}
               </select>
             </div>
+            </>
+            )}
 
             {/* Display tweaks */}
             <div style={{ margin: "6px 0 4px", borderTop: "1px solid #333" }} />
@@ -2568,7 +2688,7 @@ export function App() {
             </div>
             <Slider label="Node size" value={nodeSize} min={0.02} max={0.50} step={0.01} onChange={setNodeSize} />
             <Slider label="Edge thick" value={topoEdgeThickness} min={0.5} max={4.0} step={0.5} onChange={setTopoEdgeThickness} />
-            <Slider label="Object size" value={objectSize} min={0.02} max={1.00} step={0.01} onChange={setObjectSize} />
+            <Slider label="Object size" value={objectSize} min={0.02} max={0.50} step={0.01} onChange={setObjectSize} />
             <Slider label="Obj line" value={objectLineThickness} min={0.01} max={0.20} step={0.005} onChange={setObjectLineThickness} />
 
             </div>
@@ -2599,6 +2719,15 @@ export function App() {
           pcdLayers={pcdLayers}
           pcdPointSize={pcdPointSize}
           pcdColorScheme={pcdColorScheme}
+          renderMode={editMode === "edit" ? "pointcloud" : renderMode}
+          splatSrc={
+            selectedSplat
+              ? `/api/pcd?source=scene&name=${encodeURIComponent(selectedSplat)}`
+              : null
+          }
+          splatFormat={selectedSplat ? (splatFormatOf(selectedSplat) ?? "ply") : "ply"}
+          onSplatLoadingChange={setSplatLoading}
+          onSplatError={setSplatError}
           nodeSize={nodeSize}
           topoEdgeThickness={topoEdgeThickness}
           objectSize={objectSize}

@@ -84,29 +84,27 @@ export function NodePropertyPanel({ node, onChangePosition, onPreviewPosition, o
         Position
       </div>
 
-      <div style={{ display: "flex", gap: 8, alignItems: "flex-start" }}>
-        <AxisRow
-          axis="x"
-          localValue={localX}
-          setLocal={setLocalX}
-          commitAxis={commitAxis}
-          previewAxis={previewAxis}
-        />
-        <AxisRow
-          axis="y"
-          localValue={localY}
-          setLocal={setLocalY}
-          commitAxis={commitAxis}
-          previewAxis={previewAxis}
-        />
-        <AxisRow
-          axis="z"
-          localValue={localZ}
-          setLocal={setLocalZ}
-          commitAxis={commitAxis}
-          previewAxis={previewAxis}
-        />
-      </div>
+      <AxisRow
+        axis="x"
+        localValue={localX}
+        setLocal={setLocalX}
+        commitAxis={commitAxis}
+        previewAxis={previewAxis}
+      />
+      <AxisRow
+        axis="y"
+        localValue={localY}
+        setLocal={setLocalY}
+        commitAxis={commitAxis}
+        previewAxis={previewAxis}
+      />
+      <AxisRow
+        axis="z"
+        localValue={localZ}
+        setLocal={setLocalZ}
+        commitAxis={commitAxis}
+        previewAxis={previewAxis}
+      />
 
       <div style={{ margin: "6px 0 4px", borderTop: "1px solid #333" }} />
 
@@ -210,85 +208,96 @@ function AxisRow({
   );
 
   return (
-    <div style={{ display: "flex", flexDirection: "column", gap: 2 }}>
-      <span
+    <div style={{ marginBottom: 2 }}>
+      {/* Label + number input */}
+      <div
         style={{
-          color: "#3498db",
-          fontWeight: 600,
-          fontSize: 11,
-          textTransform: "uppercase",
-          lineHeight: 1,
+          display: "flex",
+          alignItems: "center",
+          gap: 6,
+          marginTop: 2,
         }}
       >
-        {axis}
-      </span>
-      <input
-        type="text"
-        inputMode="decimal"
-        value={draft}
-        onChange={handleInputChange}
-        onBlur={handleInputBlur}
-        onKeyDown={handleInputKeyDown}
-        style={{
-          width: 64,
-          height: 26,
-          background: "#1a1a2e",
-          color: "#eee",
-          border: "1px solid #3498db",
-          borderRadius: 4,
-          padding: "3px 6px",
-          fontFamily: "monospace",
-          fontSize: 12,
-          textAlign: "right",
-        }}
-      />
-      <div style={{ display: "flex", gap: 2 }}>
-        <button
-          type="button"
-          aria-label={`${axis} increase`}
-          onMouseDown={(e) => e.preventDefault()}
-          onClick={() => handleStep(0.01)}
+        <span
           style={{
-            flex: 1,
-            height: 22,
-            display: "flex",
-            alignItems: "center",
-            justifyContent: "center",
-            background: "#1a1a2e",
+            display: "inline-block",
+            width: 14,
             color: "#3498db",
-            border: "1px solid #3498db",
-            borderRadius: 4,
-            cursor: "pointer",
-            fontSize: 11,
-            lineHeight: 1,
-            padding: 0,
+            fontWeight: 600,
+            fontSize: 12,
+            textTransform: "uppercase",
           }}
         >
-          ▲
-        </button>
-        <button
-          type="button"
-          aria-label={`${axis} decrease`}
-          onMouseDown={(e) => e.preventDefault()}
-          onClick={() => handleStep(-0.01)}
+          {axis}
+        </span>
+        <input
+          type="text"
+          inputMode="decimal"
+          value={draft}
+          onChange={handleInputChange}
+          onBlur={handleInputBlur}
+          onKeyDown={handleInputKeyDown}
           style={{
-            flex: 1,
-            height: 22,
-            display: "flex",
-            alignItems: "center",
-            justifyContent: "center",
+            width: 96,
+            height: 30,
             background: "#1a1a2e",
-            color: "#3498db",
+            color: "#eee",
             border: "1px solid #3498db",
             borderRadius: 4,
-            cursor: "pointer",
-            fontSize: 11,
-            lineHeight: 1,
-            padding: 0,
+            padding: "4px 8px",
+            fontFamily: "monospace",
+            fontSize: 14,
+            textAlign: "right",
           }}
-        >
-          ▼
-        </button>
+        />
+        <div style={{ display: "flex", gap: 2 }}>
+          <button
+            type="button"
+            aria-label={`${axis} increase`}
+            onMouseDown={(e) => e.preventDefault()}
+            onClick={() => handleStep(0.01)}
+            style={{
+              width: 28,
+              height: 30,
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "center",
+              background: "#1a1a2e",
+              color: "#3498db",
+              border: "1px solid #3498db",
+              borderRadius: 4,
+              cursor: "pointer",
+              fontSize: 14,
+              lineHeight: 1,
+              padding: 0,
+            }}
+          >
+            ▲
+          </button>
+          <button
+            type="button"
+            aria-label={`${axis} decrease`}
+            onMouseDown={(e) => e.preventDefault()}
+            onClick={() => handleStep(-0.01)}
+            style={{
+              width: 28,
+              height: 30,
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "center",
+              background: "#1a1a2e",
+              color: "#3498db",
+              border: "1px solid #3498db",
+              borderRadius: 4,
+              cursor: "pointer",
+              fontSize: 14,
+              lineHeight: 1,
+              padding: 0,
+            }}
+          >
+            ▼
+          </button>
+        </div>
       </div>
     </div>
   );

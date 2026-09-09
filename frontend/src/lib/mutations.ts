@@ -129,25 +129,6 @@ export function addCreatePoly(
   return n;
 }
 
-/**
- * Move a pending createPoly entry (identified by its display index, i.e. the
- * synthetic negative id from effectiveNodes) while it has not yet been
- * exported to a real poly id.
- */
-export function addUpdateCreatePolyPosition(
-  m: Mutations,
-  index: number,
-  center: [number, number, number],
-): Mutations {
-  const n = shallowCopy(m);
-  if (index < 0 || index >= n.createPoly.length) return n;
-  n.createPoly[index] = {
-    ...n.createPoly[index],
-    center: [...center] as [number, number, number],
-  };
-  return n;
-}
-
 /** Append a new marker object (no point cloud, father_poly_id = -1). */
 export function addCreateObject(
   m: Mutations,

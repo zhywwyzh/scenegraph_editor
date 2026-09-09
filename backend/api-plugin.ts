@@ -16,6 +16,7 @@ import {
   readdirSync,
   statSync,
   copyFileSync,
+  createReadStream,
   renameSync,
   appendFileSync,
   rmSync,
@@ -63,6 +64,42 @@ function isValidSnapshotName(name: unknown): name is string {
     !name.includes("/") &&
     !name.includes("\\")
   );
+}
+
+/**
+ * Whitelist for cloud/splat asset file names served by /api/pcd. Restricting
+ * to known point-cloud / gaussian-splat extensions prevents arbitrary files
+ * in pcd/ (e.g. .env, .json) from being read through the endpoint.
+ */
+const CLOUD_FILE_RE = /\.(pcd|ply|splat|ksplat|spz)$/i;
+
+function isCloudFileName(name: string): boolean {
+  return CLOUD_FILE_RE.test(name);
+}
+
+/**
+ * Stream a (potentially very large, e.g. ~450MB splat) file to the client
+ * instead of buffering it wholesale into memory with readFileSync.
+ * Returns 404 (not 500) when the file no longer exists on disk.
+ */
+function streamFile(res: ServerResponse, filePath: string): void {
+  let size: number;
+  try {
+    size = statSync(filePath).size;
+  } catch {
+    sendJson(res, 404, { success: false, error: "File not found" });
+    return;
+  }
+  res.writeHead(200, {
+    "Content-Type": "application/octet-stream",
+    "Content-Length": size,
+  });
+  const stream = createReadStream(filePath);
+  stream.on("error", (err) => {
+    logToFile("server", "stream failed", { file: filePath, error: err.message });
+    res.destroy();
+  });
+  stream.pipe(res);
 }
 
 /**
@@ -1257,7 +1294,14 @@ export function apiPlugin(): Plugin {
             let filePath: string;
             if (source === "scene") {
               const name = url.searchParams.get("name");
-              if (!name || name.includes("..") || name.includes("/")) {
+              if (
+                !name ||
+                name.includes("..") ||
+                name.includes("/") ||
+                name.includes("\\") ||
+                name.includes("\0") ||
+                !isCloudFileName(name)
+              ) {
                 sendJson(res, 400, { success: false, error: "Invalid name" });
                 return;
               }
@@ -1265,7 +1309,7 @@ export function apiPlugin(): Plugin {
             } else {
               const snapshot = url.searchParams.get("snapshot");
               const relPath = url.searchParams.get("path");
-              if (!snapshot || !isValidSnapshotName(snapshot) || !relPath || relPath.includes("..") || relPath.startsWith("/") || !relPath.startsWith("objects/")) {
+              if (!snapshot || !isValidSnapshotName(snapshot) || !relPath || relPath.includes("..") || relPath.startsWith("/") || !relPath.startsWith("objects/") || !isCloudFileName(relPath.slice(relPath.lastIndexOf("/") + 1))) {
                 sendJson(res, 400, { success: false, error: "Missing/invalid snapshot or path" });
                 return;
               }
@@ -1279,26 +1323,22 @@ export function apiPlugin(): Plugin {
                 filePath = join(PROJECT_ROOT, "scene_graph_saved", snapshot, relPath);
               }
             }
-            const data = readFileSync(filePath);
-            res.writeHead(200, {
-              "Content-Type": "application/octet-stream",
-              "Content-Length": data.length,
-            });
-            res.end(data);
+            streamFile(res, filePath);
           } catch (err: any) {
             sendJson(res, 500, { success: false, error: err.message });
           }
         },
       );
 
-      // List scene-level PCD files in top-level pcd/ directory
+      // List scene-level cloud/splat files in top-level pcd/ directory
+      // (.pcd point clouds and .ply/.splat/.ksplat/.spz gaussian splats)
       server.middlewares.use(
         "/api/scene-pcds",
         async (_req: IncomingMessage, res: ServerResponse) => {
           try {
             const pcdDir = join(PROJECT_ROOT, "pcd");
             const files = readdirSync(pcdDir)
-              .filter((f) => f.endsWith(".pcd"))
+              .filter((f) => isCloudFileName(f))
               .map((f) => ({ name: f }));
             sendJson(res, 200, { files });
           } catch (err: any) {
