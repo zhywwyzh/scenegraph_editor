@@ -2756,6 +2756,28 @@ export function App() {
         </div>
       ) : null}
 
+      {/* Centered 3DGS rendering indicator */}
+      {renderMode === "3dgs" && splatLoading && (
+        <div
+          style={{
+            position: "absolute",
+            top: "50%",
+            left: "50%",
+            transform: "translate(-50%,-50%)",
+            background: "rgba(0,0,0,0.75)",
+            borderRadius: 8,
+            padding: "12px 20px",
+            color: "#fff",
+            fontSize: 14,
+            fontFamily: "monospace",
+            pointerEvents: "none",
+            zIndex: 5,
+          }}
+        >
+          正在渲染 3DGS…
+        </div>
+      )}
+
       {/* Export diff panel overlay */}
       {showDiff && snapshot && (
         <ExportDiffPanel snapshot={snapshot} onClose={() => setShowDiff(false)} />
