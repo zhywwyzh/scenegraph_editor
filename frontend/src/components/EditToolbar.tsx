@@ -7,6 +7,8 @@ interface Props {
   exporting: boolean;
   showDiff: boolean;
   showShortcuts: boolean;
+  /** Short-lived status message (e.g. "Undo applied"), pinned to the right. */
+  notice?: string | null;
   onToggleEdit: () => void;
   onReset: () => void;
   onExport: () => void;
@@ -24,6 +26,7 @@ export function EditToolbar({
   exporting,
   showDiff,
   showShortcuts,
+  notice,
   onToggleEdit,
   onReset,
   onExport,
@@ -125,6 +128,12 @@ export function EditToolbar({
             Diff
           </button>
         </>
+      )}
+
+      {notice && (
+        <span style={{ color: "#2ecc71", fontSize: 13, marginLeft: 4 }}>
+          {notice}
+        </span>
       )}
     </div>
   );

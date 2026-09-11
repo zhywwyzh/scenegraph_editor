@@ -119,18 +119,6 @@ async function loadObjectsWithLimit<T>(
   return results;
 }
 
-const EDIT_ONLY_LAYERS: Layers = {
-  areas: true,
-  areaEdges: false,
-  areaCenters: false,
-  polyPoints: false,
-  polyWireframe: false,
-  polyMesh: false,
-  topoNodes: true,
-  topoEdges: true,
-  objects: true,
-};
-
 // Shared overlay chrome. Most floating panels share the same dark background,
 // text colour and monospace font; individual panels only override what differs
 // (position, radius, padding, size).
@@ -138,6 +126,12 @@ const DARK_PANEL: CSSProperties = {
   background: "rgba(0,0,0,0.82)",
   color: "#ccc",
   fontFamily: "monospace",
+  // Subtle accent border + soft shadow give the floating panels a more
+  // polished, "designed" feel without changing the dark/blue theme.
+  border: "1px solid rgba(52,152,219,0.28)",
+  boxShadow: "0 6px 24px rgba(0,0,0,0.45)",
+  backdropFilter: "blur(6px)",
+  WebkitBackdropFilter: "blur(6px)",
 };
 
 const FLOATING_OVERLAY: CSSProperties = {
@@ -1650,9 +1644,18 @@ export function App() {
     return () => window.clearTimeout(timeout);
   }, [connectionNotice]);
 
+  // Short-lived notice pinned to the right side of the edit toolbar
+  // (undo/redo feedback), instead of the floating center banner.
+  const [toolbarNotice, setToolbarNotice] = useState<string | null>(null);
+  useEffect(() => {
+    if (!toolbarNotice) return;
+    const timeout = window.setTimeout(() => setToolbarNotice(null), 2000);
+    return () => window.clearTimeout(timeout);
+  }, [toolbarNotice]);
+
   const handleUndo = useCallback(() => {
     if (editHistory.past.length === 0) {
-      setConnectionNotice({ kind: "info", message: "Nothing to undo" });
+      setToolbarNotice("Nothing to undo");
       logEvent("undo ignored (empty past)");
       return;
     }
@@ -1661,12 +1664,12 @@ export function App() {
     setSelectedNodeIds(new Set());
     setSelectedEdgeKey(null);
     setSelectedObjectIds(new Set());
-    setConnectionNotice({ kind: "info", message: "Undo applied" });
+    setToolbarNotice("Undo applied");
   }, [editHistory.past.length]);
 
   const handleRedo = useCallback(() => {
     if (editHistory.future.length === 0) {
-      setConnectionNotice({ kind: "info", message: "Nothing to redo" });
+      setToolbarNotice("Nothing to redo");
       logEvent("redo ignored (empty future)");
       return;
     }
@@ -1675,7 +1678,7 @@ export function App() {
     setSelectedNodeIds(new Set());
     setSelectedEdgeKey(null);
     setSelectedObjectIds(new Set());
-    setConnectionNotice({ kind: "info", message: "Redo applied" });
+    setToolbarNotice("Redo applied");
   }, [editHistory.future.length]);
 
   // ---- keyboard ----
@@ -1801,11 +1804,10 @@ export function App() {
       setPreviewNodePositions(new Map());
       setEditMode("view");
     } else {
-      // Editing only works on the point-cloud renderer; leave 3DGS behind.
-      setRenderMode("pointcloud");
+      // The 3DGS splat is a background layer; keep the render mode as-is.
       setEditMode("edit");
     }
-  }, [setRenderMode]);
+  }, []);
 
   // ---- reset ----
 
@@ -2012,7 +2014,8 @@ export function App() {
     [effectiveTNodes],
   );
 
-  const renderedLayers = editMode === "edit" ? EDIT_ONLY_LAYERS : layers;
+  // Edit mode now honors the same user-adjustable layers as view mode.
+  const renderedLayers = layers;
 
   return (
     <div style={{ width: "100%", height: "100%", position: "relative" }}>
@@ -2026,6 +2029,7 @@ export function App() {
         exporting={exporting}
         showDiff={showDiff}
         showShortcuts={showShortcuts}
+        notice={toolbarNotice}
         onToggleEdit={handleToggleEdit}
         onReset={handleReset}
         onExport={handleExport}
@@ -2112,9 +2116,6 @@ export function App() {
               {snapshots.map((s) => (
                 <option key={s.name} value={s.name}>
                   {s.name}
-                  {s.summary?.poly_count != null
-                    ? `  · ${s.summary.poly_count}p`
-                    : ""}
                 </option>
               ))}
             </select>
@@ -2150,25 +2151,17 @@ export function App() {
           style={{
             position: "absolute",
             top: 54,
-            left: 16,
+            right: 16,
             zIndex: 10,
             display: "flex",
-            flexDirection: "row",
-            alignItems: "flex-start",
+            flexDirection: "column",
             gap: 8,
+            width: 340,
             maxHeight: "calc(100vh - 90px)",
+            overflowY: "auto",
+            flexShrink: 0,
           }}
         >
-          <div
-            style={{
-              display: "flex",
-              flexDirection: "column",
-              gap: 8,
-              width: 340,
-              maxHeight: "calc(100vh - 90px)",
-              flexShrink: 0,
-            }}
-          >
           <ObjectsListPanel
             objects={effectiveTObjects}
             selectedIds={selectedObjectIds}
@@ -2272,8 +2265,10 @@ export function App() {
               }}
             />
           )}
-          </div>
 
+          {/* Areas live in the same column (below objects) so the edit
+              side panel is a single column instead of an awkward two-column
+              layout when there are only a handful of areas. */}
           <AreaListPanel
             areas={effectiveAreas}
             selectedArea={selectedArea}
@@ -2355,7 +2350,7 @@ export function App() {
           data-overlay
           style={{
             ...FLOATING_OVERLAY,
-            top: 54,
+            bottom: 16,
             right: 16,
             zIndex: 10,
             borderRadius: 8,
@@ -2401,22 +2396,24 @@ export function App() {
 
       {data && (
         <>
-          {/* Layer toggles */}
-          {editMode !== "edit" && (
-            <div
-              data-overlay
-              style={{
-                ...FLOATING_OVERLAY,
-                top: 54,
-                left: 16,
-                zIndex: 10,
-                borderRadius: 8,
-                padding: "16px 20px",
-                fontSize: 14,
-                minWidth: 260,
-                userSelect: "none",
-              }}
-            >
+          {/* Layer toggles — visible in both view and edit mode, always in
+              the original top-left position. */}
+          <div
+            data-overlay
+            style={{
+              ...FLOATING_OVERLAY,
+              top: 54,
+              left: 16,
+              zIndex: 10,
+              borderRadius: 8,
+              padding: "16px 20px",
+              fontSize: 14,
+              minWidth: 260,
+              maxHeight: "calc(100vh - 90px)",
+              overflowY: "auto",
+              userSelect: "none",
+            }}
+          >
             <div
               style={{
                 color: "#fff",
@@ -2428,8 +2425,7 @@ export function App() {
               Layers
             </div>
 
-            {/* Render mode: point cloud or 3DGS (view mode only; edit mode
-                always uses the point-cloud renderer). */}
+            {/* Render mode: point cloud or 3DGS gaussian splatting. */}
             <div style={{ fontSize: 12, color: "#888", marginBottom: 4 }}>
               Render Mode
             </div>
@@ -2691,8 +2687,7 @@ export function App() {
             <Slider label="Object size" value={objectSize} min={0.02} max={0.50} step={0.01} onChange={setObjectSize} />
             <Slider label="Obj line" value={objectLineThickness} min={0.01} max={0.20} step={0.005} onChange={setObjectLineThickness} />
 
-            </div>
-          )}
+          </div>
         </>
       )}
 
@@ -2719,7 +2714,7 @@ export function App() {
           pcdLayers={pcdLayers}
           pcdPointSize={pcdPointSize}
           pcdColorScheme={pcdColorScheme}
-          renderMode={editMode === "edit" ? "pointcloud" : renderMode}
+          renderMode={renderMode}
           splatSrc={
             selectedSplat
               ? `/api/pcd?source=scene&name=${encodeURIComponent(selectedSplat)}`
@@ -2814,8 +2809,6 @@ function AreaListPanel({
         padding: "12px 16px",
         fontSize: 14,
         minWidth: 260,
-        maxHeight: "calc(100vh - 90px)",
-        overflowY: "auto",
         flexShrink: 0,
       }}
     >
